@@ -5,8 +5,8 @@ provider i.e. k8s secret, 1password, dotfile etc.
 
 ## Package
 
-`hidden-gems` is built through `../../pyproject.toml` with scikit-build-core.
-A wheel contains the `demos.hiddengems` Python package on every supported
+`hiddengems` is built through [`pyproject.toml`](../pyproject.toml) with scikit-build-core.
+A wheel contains the `hiddengems` Python package on every supported
 platform. On macOS, CMake also builds and installs
 `libkeychainorpasswordread.dylib` beside
 the Keychain provider so the `ctypes` binding can load it as a package resource.
@@ -226,7 +226,7 @@ Let `P` be the set of all provider implementations known to Hidden Gems:
 
     P = {p₁, p₂, ..., pₙ}
 
-Each operating system supports a subset of[118;1:3u those providers:
+Each operating system supports a subset of those providers:
 
     P(o) = {p ∈ P | p supports o}
 
@@ -562,6 +562,6 @@ The result order must be deterministic:
 The ordering exists for reproducibility and display. It must not implicitly
 select a provider for gem storage or retrieval.
 
-That show that any Any future provider can now be added without changing this
+That shows that any future provider can be added without changing this
 contract; it only needs to define \(D (p)\), \(F_p (E (p))\), instance
 identity, and supported operating systems.

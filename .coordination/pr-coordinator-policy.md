@@ -12,7 +12,7 @@ actually required, prefer `*` resources and all verbs unless the HOTT team
 explicitly names a narrower scope for that task.
 
 Live smoke, live read-back, deploy, delete, redeploy, and cleanup operations are
-allowed and required for this Galileo demo repository when the task asks for a
+allowed and required for this repository when the task asks for a
 live-capability claim. Do not classify live demo capability checks as blocked
 merely because they mutate demo infrastructure.
 
@@ -24,14 +24,12 @@ Before entering remediation, merge any independent PR already classified
 `baseline-merge-ready`: Treat the PR as merge-authorized after
 mandatory branch-protection checks.
 
-- Do not run the current-PR remediation loop for P1/P2/P3 findings
-that do not invalidate the
-  confirmed baseline; queue them as `FIX-FIRST` follow-up PRs based on the
-  merged baseline. Open Issue in github or gitlab. Any P0, or P1
-proving the baseline incorrect, unsafe,
+- Do not run the current-PR remediation loop for P1/P2/P3 findings that do not invalidate the
+  confirmed baseline; queue them as `FIX-FIRST` follow-up PRs based on the merged baseline.
+  Open Issue in GitHub or gitlab. Any P0, or P1 proving the baseline incorrect, unsafe,
   destructive, or unverifiable, prevents this classification.
 
-When QA reports a CONFIRMED P0 or P1 finding for the exact current PR head SHA:
+When QA reports a **CONFIRMED** P0 or P1 finding for the exact current PR head SHA:
 
 - classify the PR as fix-first;
 - require the finding to include `Duplicate evidence`, `Reuse disposition`,

@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
-# Early indicator, never a blocker.
-#
-# Every gate that decides whether a change is acceptable runs in CI, against
-# the authoritative runner, where a failure blocks the merge. This hook exists
-# only so the same findings reach us seconds after writing the code instead of
-# minutes later in a pipeline.
-#
-# It deliberately does not fail the commit. A hook that rejects a commit
-# rejects work that exists nowhere else yet: the change is in the working tree,
-# not in any object, and one more mistaken command loses it. That happened
-# here. A commit was refused over a shellcheck SC2034 on a constant read from
-# another file, the branch was reset, and 280 lines were gone. CI would have
-# reported the same warning with the commit safely recorded.
-#
-# Run ./bless.sh --staged directly when the exit code is what you want, and see
-# scripts/ci/static-gate.sh for the gates that actually block.
+# Optional early indicator, never a commit blocker. Run ./bless.sh --staged
+# directly for an exit code; CI can run ./bless.sh --all when configured.
 set -uo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -26,7 +12,6 @@ fi
 {
 	printf '\n'
 	printf 'pre-commit: the checks above reported findings. The commit still\n'
-	printf '  went through - this hook only reports. CI blocks the merge, so fix\n'
-	printf '  them before pushing or the pipeline will fail.\n\n'
+	printf '  went through - this hook only reports. Fix them before publishing.\n\n'
 } >&2
 exit 0

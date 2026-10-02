@@ -1,118 +1,125 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-GALILEO_ROOT="$({
+CI_ROOT="$({
 	cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 	pwd -P
 })"
-readonly GALILEO_ROOT
+readonly CI_ROOT
+CI_INVENTORY=
 
-# shellcheck source=lib/bash/toolchain/jobs.bash
-source "${GALILEO_ROOT}/lib/bash/toolchain/jobs.bash"
-# shellcheck source=automation/lib/core/exit_codes.bash
-source "${GALILEO_ROOT}/automation/lib/core/exit_codes.bash"
-# shellcheck source=automation/lib/core/subject.bash
-source "${GALILEO_ROOT}/automation/lib/core/subject.bash"
-# shellcheck source=automation/lib/lint/secret_paths.bash
-source "${GALILEO_ROOT}/automation/lib/lint/secret_paths.bash"
-# shellcheck source=automation/lib/lint/git_diff.bash
-source "${GALILEO_ROOT}/automation/lib/lint/git_diff.bash"
-# shellcheck source=automation/lib/lint/gitleaks.bash
-source "${GALILEO_ROOT}/automation/lib/lint/gitleaks.bash"
-# shellcheck source=automation/lib/lint/markdown.bash
-source "${GALILEO_ROOT}/automation/lib/lint/markdown.bash"
-# shellcheck source=automation/lib/lint/shellcheck.bash
-source "${GALILEO_ROOT}/automation/lib/lint/shellcheck.bash"
-# shellcheck source=automation/lib/lint/source_graph.bash
-source "${GALILEO_ROOT}/automation/lib/lint/source_graph.bash"
-# shellcheck source=automation/lib/lint/script_interface.bash
-source "${GALILEO_ROOT}/automation/lib/lint/script_interface.bash"
-# shellcheck source=automation/lib/lint/json.bash
-source "${GALILEO_ROOT}/automation/lib/lint/json.bash"
-# shellcheck source=automation/lib/lint/yaml.bash
-source "${GALILEO_ROOT}/automation/lib/lint/yaml.bash"
-# shellcheck source=automation/lib/lint/value_secret_stamps.bash
-source "${GALILEO_ROOT}/automation/lib/lint/value_secret_stamps.bash"
-# shellcheck source=automation/lib/lint/domain_lock.bash
-source "${GALILEO_ROOT}/automation/lib/lint/domain_lock.bash"
-# shellcheck source=automation/lib/lint/helm_lint.bash
-source "${GALILEO_ROOT}/automation/lib/lint/helm_lint.bash"
-# shellcheck source=automation/lib/lint/kubernetes_schema.bash
-source "${GALILEO_ROOT}/automation/lib/lint/kubernetes_schema.bash"
-# shellcheck source=automation/lib/lint/architecture_schema.bash
-source "${GALILEO_ROOT}/automation/lib/lint/architecture_schema.bash"
+# shellcheck source=lib/core/exit_codes.bash
+source "${CI_ROOT}/lib/core/exit_codes.bash"
+# shellcheck source=lib/lint/secret_paths.bash
+source "${CI_ROOT}/lib/lint/secret_paths.bash"
 
 usage() {
 	printf '%s\n' \
-		'Usage: ./bless.sh [--staged] [--dry-run]' \
-		'       ./bless.sh --help'
+		'Usage: ./bless.sh [--all | --staged] [--dry-run]' \
+		'       ./bless.sh --help' \
+		'' \
+		'Run Python, Markdown, YAML, and shell static checks.' \
+		'--all      Check tracked and untracked package files (default).' \
+		'--staged   Check staged files for the optional pre-commit hook.' \
+		'--dry-run  Print the selected file counts without running checks.'
+}
+
+ci_require_tool() {
+	if ! command -v "$1" >/dev/null 2>&1; then
+		printf 'BLOCKER: %s is unavailable.\n' "$1" >&2
+		printf 'SAFE_NEXT_STEP: install %s, then rerun bless.\n' "$1" >&2
+		return "${CI_EXIT_BLOCKED}"
+	fi
 }
 
 main() {
-	local dry_run=false
+	local mode=all dry_run=false selected_mode=false path status=0
+	local -a python_files=() markdown_files=() yaml_files=() shell_files=()
 	while (($# > 0)); do
 		case "$1" in
-		--staged) ;;
+		--all | --staged)
+			if [[ "${selected_mode}" == true ]]; then
+				usage >&2
+				return "${CI_EXIT_USAGE}"
+			fi
+			mode="${1#--}"
+			selected_mode=true
+			;;
 		--dry-run) dry_run=true ;;
 		--help)
 			usage
-			return "${GALILEO_EXIT_OK}"
+			return "${CI_EXIT_OK}"
 			;;
 		*)
 			usage >&2
-			return "${GALILEO_EXIT_USAGE}"
+			return "${CI_EXIT_USAGE}"
 			;;
 		esac
 		shift
 	done
-	local maximum="${MAX_JOBS:-4}" available jobs
-	available="$(galileo_toolchain_cpu_count)" || return
-	jobs="$(galileo_toolchain_job_count "${maximum}" "${available}")" || return
-	printf 'Bless jobs: MAX_JOBS=%s available_cpus=%s effective_jobs=%s\n' \
-		"${maximum}" "${available}" "${jobs}"
-	export JOBS="${jobs}"
-	galileo_require_staged_subject "${GALILEO_ROOT}" || return $?
-	galileo_block_staged_secret_paths "${GALILEO_ROOT}" || return $?
-	galileo_lint_staged_git_diff "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_secrets "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_markdown "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_shell "${GALILEO_ROOT}" "${dry_run}" || return $?
-	# Whole tree, not the staged set: a cycle is a property of the graph, and
-	# the commit that closes one usually touches only one of its edges.
-	if galileo_source_graph_cycles "${GALILEO_ROOT}"; then
-		printf 'Source graph: acyclic\n'
+
+	ci_require_tool git || return $?
+	cd -- "${CI_ROOT}"
+	CI_INVENTORY="$(mktemp "${TMPDIR:-/tmp}/ci-bless.XXXXXX")" ||
+		return "${CI_EXIT_BLOCKED}"
+	trap 'rm -f -- "${CI_INVENTORY}"' EXIT
+	if [[ "${mode}" == staged ]]; then
+		git diff --cached --name-only -z --diff-filter=ACMRT >"${CI_INVENTORY}" ||
+			return "${CI_EXIT_BLOCKED}"
 	else
-		printf 'BLOCKER: the library source graph has a cycle\n' >&2
-		return "${GALILEO_EXIT_INVALID_DATA}"
+		git ls-files --cached --others --exclude-standard -z >"${CI_INVENTORY}" ||
+			return "${CI_EXIT_BLOCKED}"
 	fi
-	# Bash has one namespace, so the file is the only separation there is: two
-	# files defining one name is whichever was sourced last, silently.
-	if galileo_source_graph_duplicate_functions "${GALILEO_ROOT}"; then
-		printf 'Source graph: every sourced function name is defined once\n'
+	while IFS= read -r -d '' path; do
+		[[ -f "${path}" ]] || continue
+		case "${path}" in
+		.internal/* | .coordination/* | .codex/* | .claude/* | .idea/* | docs/vendor/*)
+			continue
+			;;
+		esac
+		case "${path}" in
+		*.py) python_files+=("${path}") ;;
+		*.md) markdown_files+=("${path}") ;;
+		*.yaml | *.yml) yaml_files+=("${path}") ;;
+		*.sh | *.bash | .githooks/*) shell_files+=("${path}") ;;
+		esac
+	done <"${CI_INVENTORY}"
+
+	if [[ "${dry_run}" == true ]]; then
+		printf '{"status":"PLAN","mode":"%s","python":%s,"markdown":%s,"yaml":%s,"shell":%s}\n' \
+			"${mode}" "${#python_files[@]}" "${#markdown_files[@]}" \
+			"${#yaml_files[@]}" "${#shell_files[@]}"
+		return "${CI_EXIT_OK}"
+	fi
+
+	if [[ "${mode}" == staged ]]; then
+		ci_block_staged_secret_paths "${CI_INVENTORY}" || return $?
+		git diff --cached --check >&2 || status=1
+	fi
+	if ((${#python_files[@]} > 0)); then
+		ci_require_tool ruff || return $?
+		ruff check --no-cache -- "${python_files[@]}" >&2 || status=1
+		ruff format --check --no-cache -- "${python_files[@]}" >&2 || status=1
+	fi
+	if ((${#markdown_files[@]} > 0)); then
+		ci_require_tool markdownlint-cli2 || return $?
+		markdownlint-cli2 --config .markdownlint-cli2.yaml \
+			"${markdown_files[@]}" >&2 || status=1
+	fi
+	if ((${#yaml_files[@]} > 0)); then
+		ci_require_tool yamllint || return $?
+		yamllint "${yaml_files[@]}" >&2 || status=1
+	fi
+	if ((${#shell_files[@]} > 0)); then
+		ci_require_tool shellcheck || return $?
+		shellcheck "${shell_files[@]}" >&2 || status=1
+	fi
+	if ((status == 0)); then
+		printf '{"status":"PASS","mode":"%s"}\n' "${mode}"
 	else
-		printf 'BLOCKER: a function name is defined in more than one library file\n' >&2
-		return "${GALILEO_EXIT_INVALID_DATA}"
+		printf '{"status":"FAIL","mode":"%s"}\n' "${mode}"
 	fi
-	if galileo_source_graph_tests_source_two_scripts "${GALILEO_ROOT}"; then
-		printf 'Source graph: no test sources two executables\n'
-	else
-		printf 'BLOCKER: a test sources two executables into one shell\n' >&2
-		return "${GALILEO_EXIT_INVALID_DATA}"
-	fi
-	galileo_lint_staged_script_interface "${GALILEO_ROOT}" "${dry_run}" ||
-		return $?
-	galileo_lint_staged_json "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_yaml "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_value_secret_stamps "${GALILEO_ROOT}" "${dry_run}" ||
-		return $?
-	galileo_lint_staged_domain_lock "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_architecture_schema "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_helm_chart "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_render_staged_helm_chart "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_kubernetes_schema "${GALILEO_ROOT}" "${dry_run}" || return $?
-	galileo_lint_staged_kubernetes_policy "${GALILEO_ROOT}" "${dry_run}"
+	return "${status}"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-	main "$@"
-fi
+main "$@"

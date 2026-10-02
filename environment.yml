@@ -9,19 +9,9 @@ dependencies:
   - ruff=0.16.7
   - yamllint
   - python-dotenv
-  - pip:
-      - build
-      - anthropic
-      - mcp>=2.2,<3
-      - httpx2>=2.5,<3
-      - galileo
-      - check-jsonschema
-      - installer
-      - onepassword
-      - scikit-build-core>=1.0,<2
-      - splunk-ao
-      - tomli-w
-      - galileo
-  - kubernetes
   - python-kubernetes
   - pyyaml
+  - pip:
+      - build
+      - onepassword
+      - scikit-build-core>=1.0,<2

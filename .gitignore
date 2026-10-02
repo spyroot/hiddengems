@@ -3,10 +3,30 @@ docs/.DS_Store
 docs/**/.DS_Store
 templates/.DS_Store
 templates/**/.DS_Store
+# Agent data: local only, never tracked.
 AGENTS.md
 CODEX_HANDOFF.md
 TEAM_GUIDE.md
 CLAUDE*.md
 CODEX*.md
+GEMINI.md
+.claude/
+.codex/
+.gemini/
+.cursor/
+.cursorrules
+.aider*
+.mcp.json
+.github/copilot-instructions.md
+.coordination/
 .internal/
 .idea/
+
+# Python and build outputs.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/

@@ -3,8 +3,10 @@ set -Eeuo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 
-# shellcheck source=automation/lib/core/exit_codes.bash
+# shellcheck source=lib/core/exit_codes.bash
 source "${repo_root}/lib/core/exit_codes.bash"
+# shellcheck source=lib/lint/secret_paths.bash
+source "${repo_root}/lib/lint/secret_paths.bash"
 
 usage() {
 	cat <<'USAGE'
