@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# shellcheck source=automation/lib/core/exit_codes.bash
+source "${repo_root}/lib/core/exit_codes.bash"
+
+usage() {
+	cat <<'USAGE'
+Usage:
+  .githooks/commit-msg <commit-message-file>
+  .githooks/commit-msg --help
+
+Reject secret-class agent/workflow references in a Git commit message.
+
+Arguments:
+  <commit-message-file>  Git's temporary commit message file.
+  --help                 Show this help.
+USAGE
+}
+
+main() {
+	trap 'exit "${CI_EXIT_SIGNAL_INT}"' INT
+	trap 'exit "${CI_EXIT_SIGNAL_TERM}"' TERM
+
+	if (($# == 1)) && [[ "${1}" == "--help" ]]; then
+		usage
+		return "${CI_EXIT_OK}"
+	fi
+	if (($# != 1)); then
+		usage >&2
+		return "${CI_EXIT_USAGE}"
+	fi
+	ci_block_secret_commit_message "$1"
+}
+
+main "$@"
