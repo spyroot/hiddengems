@@ -51,5 +51,23 @@ list of values from exactly one resolved location; it raises when the name is
 missing, ambiguous, or cannot be checked completely. Do not print or log the
 returned values. Writing a value uses `hide_gem` with an explicit provider.
 
+## Contribution
+
+- Run `bless.sh` before each commit or merge. CI repeats the static checks.
+
+```sh
+make install toolchain
+make bless
+make install bless
+```
+
+Before commit and PR check before calling a package change complete, build its wheel, install it outside
+the source tree, and test imports and the relevant provider behavior.
+
+Use isolated, non-secret fixtures for provider tests. what was verified
+and what still requires a platform or credential that was not available.
+
+go-no-go should include evidence for all functionality.
+
 See [the specification](docs/README.md) for provider selection, detection,
 configuration, and error semantics.
