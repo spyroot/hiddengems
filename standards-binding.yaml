@@ -6,7 +6,7 @@ spec:
   source:
     localPath: /Users/spyroot/dev/standards
     repository: https://github.com/spyroot/standards
-    revision: 05d7352738025b0791e7073a942a026f7dbf6b76
+    revision: 23e8e7e893d3c38ad49a057effa4754de0f97fef
   requiredContracts:
     - ci
     - unit-testing
