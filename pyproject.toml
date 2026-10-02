@@ -1,0 +1,41 @@
+[tool.yamlfix]
+line_length = 80
+explicit_start = false
+preserve_quotes = true
+
+[build-system]
+requires = ["scikit-build-core>=1.0,<2"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "hidden-gems"
+version = "0.1.0"
+description = "A nifty library for finding hidden gems such as API keys, secrets, and tokens across credential providers."
+readme = "demos/README.md"
+requires-python = ">=3.11"
+dependencies = ["kubernetes>=36.0.3", "python-dotenv>=1.2.3", "PyYAML>=6.0.3"]
+
+[project.optional-dependencies]
+onepassword = ["onepassword>=0.4.1"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.py-api = "py3"
+wheel.reproducible = true
+
+[tool.scikit-build.wheel.packages]
+"demos/hiddengems" = "demos/hiddengems"
+
+# Settings for the Python tools in the galileo conda environment
+# (environment.yml). CI runs both through scripts/ci/static-gate.sh, as the
+# static:pytest and static:ruff gates declared in gates/manifest.yaml.
+
+[tool.pytest.ini_options]
+# The tests import the shared package from src/ without installing it.
+pythonpath = ["src"]
+testpaths = ["tests"]
+# A read-only CI checkout has nowhere useful to keep a cache.
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+target-version = "py311"
