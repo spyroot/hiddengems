@@ -1,0 +1,4 @@
+*.docx binary
+*.pdf binary
+*.tgz binary
+docs/vendor/original/** -diff
