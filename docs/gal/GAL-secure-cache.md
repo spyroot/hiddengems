@@ -437,8 +437,8 @@ A profile is a declared, supported combination. The contract suite runs on every
 
 - **`__init__(..., cache: AbstractSecretCache = PASS_THROUGH_CACHE)`,** a keyword-only parameter after
   `refresh` from `GAL-remember`. It stores `cache` and computes `self._routing_revision` as defined under
-  `CacheRequest`. It computes it again whenever `HiddenGems.preferences` changes, as `save_preference` does in
-  `dig_gem` step 5, and after `HiddenGems.invalidate` detects again.
+  `CacheRequest`. It computes it again whenever `HiddenGems.preferences` changes, as it does when `dig_gem` sets
+  the saved choice after `save_preference` in step 5, and after `HiddenGems.invalidate` detects again.
 - **`dig_gem`** gains the keyword-only parameter `refresh: bool = False`, after `masked` from
   `GAL-masked-value`. The final signature is `dig_gem(self, name, *, provider=None, target=None, criteria=None,
   choice=None, remember=False, masked=False, refresh=False)`. Its body becomes:
@@ -507,8 +507,9 @@ providers are unchanged.
 - **`OnePasswordProvider`.** Applicable contract `C`: `AbstractGemProvider`, `DeadlineAwareGemProvider`. How it
   satisfies it: unchanged by this feature; reached only through `_resolve_within` and the read inside the loader.
 - **`DotEnvProvider`.** Applicable contract `C`: `AbstractGemProvider`, `WritableGemProvider`,
-  `DeadlineAwareGemProvider`. How it satisfies it: unchanged by this feature; reached only through
-  `_resolve_within` and the read inside the loader.
+  `DeadlineAwareGemProvider`; under `GAL-plugin` option one, `AbstractGemProvider`, `DeadlineAwareGemProvider`.
+  How it satisfies it: unchanged by this feature; reached only through `_resolve_within` and the read inside
+  the loader.
 - **`KeyringProvider`.** Applicable contract `C`: `AbstractGemProvider`, and `DeadlineAwareGemProvider` under
   Keychain option (a). How it satisfies it: unchanged by this feature; reached only through `_resolve_within` and
   the read inside the loader.
@@ -516,7 +517,8 @@ providers are unchanged.
   satisfies it: unchanged by this feature; reached only through `_resolve_within` and the read inside the loader.
 
 `C` is `B` with the approved Δ of `GAL-plugin`, `GAL-expand`, `GAL-parallel`, and `GAL-remember`; this feature
-adds nothing to it, and none of the four is edited.
+adds nothing to it, and none of the four is edited. Under `GAL-plugin` option one, `WritableGemProvider` does not
+exist, and no provider subclasses it.
 
 ### 4. Baseline tests whose expectations change
 
@@ -651,12 +653,13 @@ payload and the authenticated metadata.
 
 ## Acceptance cases
 
-The blocking gate is `tests/contract/test_secret_cache_contract.py`, in the contract-test location of
-`GAL-plugin`. S1 to S10, S12, and S13 are parametrized over the eight profile combinations, and S11 over the
-four `AsyncSecretCache` combinations; a test, or part of one, that claims process sharing runs only on the disk
-profile. S14 uses no cache. S15, S17 to S20, and S22 run on the memory profile with each cipher. S16 runs on
-the disk profile. S21 calls the builders directly. Every test uses a controlled lifetime clock, a `tmp_path`
-root, and fake providers with fixture values, never a real secret or the real home directory.
+The blocking gate is `tests/contract/test_secret_cache_contract.py`, in the contract-test location of `GAL-plugin`. S1,
+S6 to S10, S12, and S13 are parametrized over the eight profile combinations; S2 to S5 over the four `SecretCache`
+combinations, because `HiddenGems` takes an `AbstractSecretCache` and has no async API; and S11 over the four
+`AsyncSecretCache` combinations; a test, or part of one, that claims process sharing runs only on the disk profile. S14
+uses no cache. S15, S17 to S20, and S22 run on the memory profile with each cipher. S16 runs on the disk profile. S21
+calls the builders directly. Every test uses a controlled lifetime clock, a `tmp_path` root, and fake providers with
+fixture values, never a real secret or the real home directory.
 
 The owner's twelve cases:
 
@@ -701,7 +704,9 @@ Added by this proposal:
   `find_gem` and `get_gem`, as the baseline routing tests expect.
 - **S15** `test_hide_gem_invalidates_the_cache`: the writer is a test class
   `DeadlineAwareWritableEnvironmentProvider(WritableEnvironmentProvider, DeadlineAwareGemProvider)` defined in
-  the test, over `WritableEnvironmentProvider` from `tests/contract/example_providers.py` (`GAL-plugin`). Its
+  the test, over `WritableEnvironmentProvider` from `tests/contract/example_providers.py` (`GAL-plugin`); under
+  `GAL-plugin` option one, where `WritableEnvironmentProvider` does not exist, its bases are `EnvironmentProvider`,
+  whose `put_gem` the kit then defines, and `DeadlineAwareGemProvider`. Its
   `find_gem_within` and `get_gem_within` delegate to `find_gem` and `get_gem`, so its read is `SUPPORTED`
   under `GAL-parallel`. It is registered by replacing `GemProvider.provider_types`. After a write, the next
   read goes to the provider.
@@ -722,9 +727,11 @@ Added by this proposal:
   with `CACHE_DISK_UNSUPPORTED`; a `ttl_seconds` outside `CACHE_MIN_PERIOD_SECONDS`..`CACHE_PERIOD_SECONDS` raises
   `ValueError`.
 - **S22** `test_remember_saves_the_choice_on_a_hit_and_a_miss`: with two candidates for `x` and a cache,
-  `dig_gem("x", choice=key, remember=True)` reads the provider once and calls `save_preference` with `key`; the
-  identical call again is a hit, makes no provider call, and calls `save_preference` again. Without `remember`,
-  `save_preference` is not called.
+  `dig_gem("x", choice=key, remember=True)` reads the provider once and calls `save_preference` with the
+  preference for `key`. That save changes `HiddenGems.preferences`, so the identical second call is a new
+  request: it misses, reads the provider once, and calls `save_preference` again. The identical third call is a
+  hit, makes no provider call, and calls `save_preference` again. Without `remember`, `save_preference` is not
+  called.
 
 ## Dependencies on other features
 
