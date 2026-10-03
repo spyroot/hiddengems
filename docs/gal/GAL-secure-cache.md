@@ -71,7 +71,8 @@ Both AEAD classes are in `cryptography.hazmat.primitives.ciphers.aead`.
 | Tamper detection | `cryptography.exceptions.InvalidTag`, raised by `decrypt` on altered data or metadata |
 | Nonces and ids | `secrets.token_bytes`, `secrets.token_hex` |
 | Request identity | `hmac.new(key, message, hashlib.sha256)` |
-| File locks | `fcntl.flock`, through `atomic_file.exclusive_write_lock` from `GAL-remember` |
+| Atomic files | `atomic_file.rewrite_file` from `GAL-remember`: temporary file, mode `0600`, `os.replace` |
+| File locks | `fcntl.flock` with `LOCK_EX` and `LOCK_NB`, polled until the deadline |
 | Async | `asyncio.Lock`, `asyncio.shield`, `asyncio.timeout`, `asyncio.to_thread` |
 
 - **Checked:** in the `hiddengems` environment, `cryptography` 50.0.2 provides both AEAD classes with
@@ -259,7 +260,8 @@ and also:
   - It publishes only if `record.epoch.generation == current.generation`, and returns `RETIRED` otherwise.
     The caller acquires `current` inside the generation fence, which is what makes the condition hold at
     publication.
-  - Publication is atomic: a temporary file in the generation's directory, then `os.replace`.
+  - Publication is atomic: `rewrite_file` writes a temporary file in the generation's directory, then calls
+    `os.replace`.
   - It returns `FULL` at `CACHE_MAX_RECORDS` records in one generation.
 - `delete_epoch(self, epoch: CacheEpoch) -> int`: removes the generation's records and returns their number.
 - Adapters:
@@ -561,7 +563,7 @@ Added by this proposal:
 
 - **Blocked by:**
   - `GAL-parallel`, for `Deadline` with its injected clock and for `get_gem_within`;
-  - `GAL-remember`, for `HiddenGems.invalidate` and `atomic_file.exclusive_write_lock`;
+  - `GAL-remember`, for `HiddenGems.invalidate` and `atomic_file.rewrite_file`;
   - `GAL-plugin`, for the `tests/contract/` location.
 - **Relates to:**
   - the proposed Keychain existence check, which removes the second Keychain read even without a cache;
