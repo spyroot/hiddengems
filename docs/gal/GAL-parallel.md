@@ -139,7 +139,8 @@ Out of scope:
   within `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every operation it starts, including a
   process or a request, ends within that time.
 - **Built-ins:** each implements both methods, except `KeyringProvider` under Keychain option (b). Its existing
-  `find_gem` and `get_gem` delegate to them with `Deadline.unbounded()`, so direct callers keep today's behavior.
+  `find_gem` and `get_gem` delegate to them with `Deadline.unbounded()`, so direct callers keep today's behavior,
+  except `KeyringProvider` under Keychain option (a), whose native read never shows a prompt.
 - **Unbounded means today's calls.** When `deadline.expires_at` is `math.inf`, a built-in makes exactly the
   calls it makes at `4438234`, with today's arguments. `_request_timeout`, a `deadline=` argument to
   `_run_cli`, and the `asyncio.wait_for` wrapper are added only for a finite deadline.
@@ -150,7 +151,8 @@ Out of scope:
   - `UNKNOWN`, with `DEADLINE_LEGACY_REASON`, for any other class on which `inspect.getattr_static` finds both a
     callable `find_gem_within` and a callable `get_gem_within` through the method resolution order;
   - `UNSUPPORTED`, with `DEADLINE_UNSUPPORTED_REASON`, otherwise.
-- **New constants in `constants/capability.py`,** which `GAL-plugin` creates: `DEADLINE_SUPPORTED_REASON`,
+- **New constants in `constants/capability.py`,** which `GAL-plugin` creates (this feature creates it under
+  `GAL-plugin` option one): `DEADLINE_SUPPORTED_REASON`,
   `DEADLINE_LEGACY_REASON`, `DEADLINE_UNSUPPORTED_REASON`, `DEADLINE_CAPABILITY_INPUT_ERROR`, and
   `LEGACY_DEADLINE_WARNING`, with the values listed under [Constants](#constants).
 
@@ -203,8 +205,9 @@ Built-in deadline handling:
   deadline check before each namespace request still stops further requests.
 - **1Password CLI:** `subprocess.run(..., timeout=min(CLI_TIMEOUT_SECONDS, deadline.remaining()))`. On timeout,
   `run` kills the `op` process and waits for it, so the process has ended when the call returns.
-- **1Password SDK:** `asyncio.run(asyncio.wait_for(self._find_sdk(...), deadline.remaining()))`. The SDK is not
-  installed in the `hiddengems` environment, so whether cancelling stops its native work is not known. Rule:
+- **1Password SDK:** `asyncio.run(asyncio.wait_for(self._find_sdk(...), deadline.remaining()))`. The SDK
+  (`onepassword` 0.4.1) is installed in the `hiddengems` environment, but whether cancelling stops its native work
+  has not been measured. Rule:
   the SDK path is bounded only if `test_onepassword_sdk_work_ends_at_the_deadline`, run with the SDK
   installed, finds no SDK task or thread alive after the call returns. If it does not pass,
   `OnePasswordProvider.find_gem_within` and `get_gem_within` raise
@@ -350,13 +353,20 @@ proposal. `B` loses no member and changes no signature. The factory is unchanged
 
 ### 3. Providers in P
 
-| Provider | Applicable contract | `deadline_capability` | How it stops at the deadline |
-| --- | --- | --- | --- |
-| `OnePasswordProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | CLI timeout kills `op`; SDK under `wait_for` |
-| `DotEnvProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | checks the deadline before reading |
-| `KeyringProvider`, Keychain option (a) | `DeadlineAwareGemProvider` | `SUPPORTED` | a non-interactive query |
-| `KeyringProvider`, Keychain option (b) | `AbstractGemProvider` | `UNSUPPORTED` | the non-cooperative path |
-| `KubernetesProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | `_request_timeout` from the remaining time |
+| Provider | `deadline_capability` | How it stops at the deadline |
+| --- | --- | --- |
+| `OnePasswordProvider` | `SUPPORTED` | CLI timeout kills `op`; SDK under `wait_for` |
+| `DotEnvProvider` | `SUPPORTED` | checks the deadline before reading |
+| `KeyringProvider`, Keychain option (a) | `SUPPORTED` | a non-interactive query |
+| `KeyringProvider`, Keychain option (b) | `UNSUPPORTED` | the non-cooperative path |
+| `KubernetesProvider` | `SUPPORTED` | `_request_timeout` from the remaining time |
+
+- **Applicable contract,** `C` restricted to the classes each provider subclasses:
+  - `OnePasswordProvider` and `KubernetesProvider`: `AbstractGemProvider`, `DeadlineAwareGemProvider`;
+  - `DotEnvProvider`: `AbstractGemProvider`, `WritableGemProvider`, `DeadlineAwareGemProvider`;
+  - `KeyringProvider`: `AbstractGemProvider`, and `DeadlineAwareGemProvider` under Keychain option (a).
+
+  Under `GAL-plugin` option one, `WritableGemProvider` does not exist, and no provider subclasses it.
 
 ### 4. Baseline tests whose expectations change
 
