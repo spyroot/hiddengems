@@ -72,7 +72,8 @@ determine, and only once. This strategy is a proposal derived from the sets abov
   that is 200 prompts. The Keychain is worse today: each `dig_gem` reads it twice, in `find_gem` and again in
   `get_gem`, so an item that prompts on every read can prompt up to 400 times. An encrypted cache with a
   re-prompt interval would ask once per interval instead of once per request; `GAL-secure-cache` proposes it in
-  [GAL-secure-cache.md](gal/GAL-secure-cache.md).
+  [GAL-secure-cache.md](gal/GAL-secure-cache.md). Under Keychain option (a), no lookup shows a Keychain prompt; an
+  item that needs one is reported UNKNOWN.
 - **Only decision-relevant unknowns block.** An unchecked instance `u` matters only if adding it to `R(g)`
   could change the decision. With `Pref(g) = ∅`, every `u` matters, because it could add a tie or the only
   match. With an explicit `Pref(g)`, only a `u` inside the preference matters. This is a proposed answer to
@@ -130,7 +131,7 @@ optional argument.
 | `onepassword_provider.py:346` | use the default account | a default-account marker | `GAL-onepassword-unknown` |
 | `k8s_provider.py:277-285,452` | bad kubeconfig, skipped | UNKNOWN with a reason | `GAL-kube-contexts` |
 | `k8s_provider.py:292-298,459` | malformed contexts list, skipped | UNKNOWN with a reason | `GAL-kube-contexts` |
-| `dotenv_provider.py:442-454,481` | declared file missing, skipped | `Presence.ABSENT` | `GAL-expand` |
+| `dotenv_provider.py:442-454,481` | declared file missing, skipped | no record; `ProviderState.ABSENT` | `GAL-expand` |
 | `dotenv_provider.py:369-418` | walk outcome as free text | `DotEnvWalkOutcome` | `GAL-expand` |
 | `k8s_provider.py:92-203` | walk and file outcomes as free text | `KubeWalkOutcome`, `KubeFileIssue` | `GAL-expand` |
 | `dotenv_provider.py:207` | `_DotEnvPathRecord.access_issue`: file readable | `presence: Presence` | `GAL-expand` |
@@ -138,7 +139,7 @@ optional argument.
 | `dotenv_provider.py:243-248` | `access_issue`: file readable | `presence: Presence` | `GAL-expand` |
 | `k8s_provider.py:74` | `scan_issue`: walk complete | `walk_outcome` | `GAL-expand` |
 | `hidden_gems.py:166` | no explicit selection | an explicit scope rule | `GAL-scope` |
-| `k8s_provider.py:76` | pseudo-instance with no file | the pseudo-instance marker | first consumer |
+| `k8s_provider.py:76` | pseudo-instance with no file | the pseudo-instance marker | a feature that needs more |
 
   `None` stays only where it means "not given" for an optional argument, such as `criteria=None`, and for a date
   a provider does not expose, which `docs/README.md` says "remains empty". The specification's own names that
@@ -163,7 +164,7 @@ Required cases:
 | `GAL-hidden-undetected` | `x` lies only in `Undetected` | No row sees it; the caller declares it |
 | `GAL-case-onepassword-unknown` | 1Password app, no CLI or SDK; `R(x) = {dotenv}` | Incomplete; caller decides |
 | `GAL-case-no-provider` | No provider detected at all: `A(o) = ∅` | Not found, with the only empty result |
-| `GAL-case-repeated-reads` | `R(x) = {i}`; 200 tests read `x` | Single; one prompt per period with `GAL-secure-cache` |
+| `GAL-case-repeated-reads` | `R(x) = {i}`; 200 tests read `x` | Single; one prompt a period (1Password; Keychain (b)) |
 
 Additional cases:
 
@@ -258,7 +259,8 @@ request, and no feature proposal changes it.
 ### Register
 
 A feature not listed here has `Δ = ∅`: it leaves `B` and the factory as they are, and the gate still applies to
-it. Its pull request shows that every `p ∈ P` still satisfies `B` and that baseline test expectations are kept.
+it. Its pull request shows that every `p ∈ P` still satisfies its applicable contract in `C` and that baseline
+test expectations are kept.
 
 Status values:
 
@@ -349,10 +351,10 @@ New classes proposed so far:
 Decided reuse, with no new class: a lookup timeout is `ProviderLookupError` with `TIMEOUT_REASON` (`GAL-parallel`);
 a plain directory path or a home-rooted tree is `ValueError` (`GAL-expand`); several failed invalidation steps
 are one built-in `ExceptionGroup` (`GAL-remember`); `write_capability` with a non-class input is `TypeError`
-(`GAL-plugin`); a uniform read error would be `ProviderLookupError` (proposed `GAL-read-errors`); a legacy writer
-or a provider that defines `find_gem_within` without its base class warns with `DeprecationWarning` (`GAL-plugin`,
-`GAL-parallel`); an `invalidate` override is `TypeError` (`GAL-remember`); a timed-out cache wait is
-`IncompleteGemLookupError` (`GAL-secure-cache`).
+(`GAL-plugin`); a uniform read error would be `ProviderLookupError` (proposed `GAL-read-errors`); a legacy writer,
+or a provider that defines both `find_gem_within` and `get_gem_within` without their base class, warns with
+`DeprecationWarning` (`GAL-plugin`, `GAL-parallel`); an `invalidate` override is `TypeError` (`GAL-remember`); a
+timed-out cache wait is `IncompleteGemLookupError` (`GAL-secure-cache`).
 
 ## Feature index
 
@@ -378,7 +380,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-write-target` | `hide_gem(target=...)` writes through one named target | [Writes](#46-writes) |
 | `GAL-chooser` | Caller picks from a `candidates` dict; `remember=True` saves it | [Router](#45-router-and-resolution) |
 | `GAL-explain` | `explain(name)` reports a routing decision without reading values | [Router](#45-router-and-resolution) |
-| `GAL-parallel` | Parallel lookup; every provider call stops at the deadline | [GAL-parallel.md](gal/GAL-parallel.md) |
+| `GAL-parallel` | Parallel lookup under a deadline, except two stated limits | [GAL-parallel.md](gal/GAL-parallel.md) |
 | `GAL-cli-detect` | `detect` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-targets` | `targets` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-explain` | `explain` command | [Additional pieces](#7-additional-pieces) |
@@ -444,7 +446,7 @@ Nothing is rewritten wholesale.
                                              GAL-chooser, GAL-explain, GAL-parallel, GAL-verify, GAL-remember
 +   atomic_file.py                           GAL-chooser (locked file rewrite moved out of dotenv_provider), used by
                                              GAL-remember and GAL-secure-cache
-+   canonical_json.py                        GAL-remember
++   canonical_json.py                        GAL-chooser, used by GAL-remember and GAL-secure-cache
 +   chooser.py                               GAL-chooser (prompt moved out of resolve_gem)
 +   cli.py                                   GAL-cli-detect, then one subcommand per GAL-cli-* feature
 +   config.py                                GAL-targets (config reading moved out of HiddenGems.__init__),
@@ -454,17 +456,17 @@ Nothing is rewritten wholesale.
 +   constants/capability.py                  GAL-plugin, GAL-parallel
 +   constants/cli.py                         GAL-cli-detect
 +   constants/config.py                      GAL-settings, then GAL-discovery, GAL-targets, GAL-expand, GAL-local-off,
-                                             GAL-chooser, GAL-remember
+                                             GAL-chooser
 +   constants/lookup.py                      GAL-settings, then GAL-chooser, GAL-parallel
 +   constants/platform.py                    GAL-sdk-optional, then GAL-expand
 +   constants/remember.py                    GAL-remember
 +   detection_cache.py                       GAL-remember
 ~   gem_provider.py                          GAL-settings (check_settings), GAL-discovery, GAL-sdk-optional, GAL-expand,
-                                             GAL-remember
-~   hidden_gems.py                           GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-targets,
-                                             GAL-local-off, GAL-scope, GAL-routing, GAL-chooser, GAL-explain,
-                                             GAL-write-target, GAL-parallel, GAL-remember, GAL-verify,
-                                             GAL-masked-value, GAL-secure-cache
+                                             GAL-local-off, GAL-remember
+~   hidden_gems.py                           GAL-plugin, GAL-expand, GAL-settings, GAL-selector,
+                                             GAL-discovery, GAL-targets, GAL-local-off, GAL-scope, GAL-routing,
+                                             GAL-chooser, GAL-explain, GAL-write-target, GAL-parallel, GAL-remember,
+                                             GAL-verify, GAL-masked-value, GAL-secure-cache
 +   pattern_walk.py                          GAL-expand
 +   schemas/gem-provider-config.schema.json  GAL-targets, GAL-remember
 +   secret_cache.py                          GAL-secure-cache
@@ -481,17 +483,17 @@ Nothing is rewritten wholesale.
 ~     keychain_bridge.h                      GAL-parallel under Keychain option (a), or a proposed Keychain feature
 ~     keychain_reader.cpp                    GAL-parallel under Keychain option (a), or a proposed Keychain feature
       keychain_reader.hpp                changed only by a proposed Keychain feature
-+     keychain_constants.py                  GAL-settings, GAL-parallel
++     keychain_constants.py                  GAL-settings, GAL-parallel, GAL-remember
       keychainorpasswordread.cpp
 ~     keyring_provider.py                    GAL-plugin, GAL-settings, GAL-sdk-optional, GAL-parallel, GAL-remember
 +     kubernetes_constants.py                GAL-settings, GAL-expand, GAL-kube-contexts, GAL-remember
-+     onepassword_constants.py               GAL-settings
++     onepassword_constants.py               GAL-settings, GAL-parallel, GAL-remember
 ~     onepassword_provider.py                GAL-plugin, GAL-settings, GAL-selector, GAL-discovery, GAL-parallel,
                                              GAL-remember
       types.py
 +     <name>_provider.py, <name>_constants.py   one pair per new provider
   tests/
-+   contract/example_providers.py            GAL-plugin, then GAL-discovery, GAL-expand, GAL-parallel, GAL-remember
++   contract/example_providers.py            GAL-plugin, then GAL-discovery, GAL-parallel, GAL-remember
 +   contract/test_provider_contract.py       GAL-plugin, then GAL-discovery, GAL-expand, GAL-parallel, GAL-remember
 +   contract/test_secret_cache_contract.py   GAL-secure-cache
 +   fixtures/config/                         GAL-targets
@@ -556,8 +558,9 @@ Gaps that block the goals, with evidence:
    `dotenv:unverified:<root>` and `kubernetes:unverified:<path>`. This design keeps them.
    A separate issue list gives the same lookup outcome, `IncompleteGemLookupError`, and changing what
    `detect()` returns would break every provider, including one registered by replacing
-   `GemProvider.provider_types`. The first feature that must tell a pseudo-instance from a real one, such as
-   `GAL-cli-targets` or `GAL-explain`, adds an optional `DetectedProvider.issue` field in its own scope.
+   `GemProvider.provider_types`. A pseudo-instance is told apart from a real record by its `scan_issue` record
+   setting, which only a pseudo-instance carries; `GAL-expand` keeps that rule and `GAL-remember` relies on it. A
+   feature that needs more adds an optional `DetectedProvider.issue` field in its own scope.
 7. **Writes cannot target an instance.** `hide_gem` raises `AmbiguousGemError` with an empty result when a
    provider has more than one instance, and it has no parameter to pick one. Only dotenv implements `put_gem`.
 8. **Sequential fan-out.** `inspect_gem` calls `find_gem` instance by instance. With N clusters, each checking
@@ -588,8 +591,8 @@ Functional:
 Non-functional:
 
 - Detection stays local and bounded: no network, no prompt, no credential plugin execution.
-- Lookup across targets runs concurrently under one time limit per lookup, which every provider call honors.
-  Results stay deterministic.
+- Lookup across targets runs concurrently under one time limit per lookup, which every provider call honors,
+  except under the two known limits stated in [GAL-parallel.md](gal/GAL-parallel.md). Results stay deterministic.
 - Optional provider dependencies stay optional. A missing SDK is reported as evidence, not as an `ImportError`.
 - Unit tests need no network or real credentials.
 
@@ -708,8 +711,9 @@ class ProviderSpec(Protocol):
 - **`routes`** are evaluated in declared order, and the first match applies. `match` is a glob on the gem name.
   `targets` may use globs on target names. `selector` carries provider-specific location keys.
 - **`preferences`** keeps its current meaning: one gem name maps to one target, optionally with a selector.
-- **v1 files** (`providers` and `preferences` with `provider` and `instance_id`) are migrated in memory. The
-  file is never rewritten without an explicit command.
+- **v1 files** (`providers` and `preferences` with `provider` and `instance_id`) are migrated in memory;
+  migration never rewrites the file. The library writes it only for `remember=True` (`GAL-chooser`),
+  `config init --write` (`GAL-cli-init`), and the `remembered` key that `GAL-remember` sets when it detects.
 - **A JSON Schema** for the file is checked in under `schemas/` and validated by tests against valid and
   invalid fixtures.
 
@@ -771,9 +775,9 @@ Then:
   some providers but not others leaves those others `not applicable`, which is today's behavior for valid
   keys.
 - **Fan-out.** `find_gem_within()` runs on a thread pool bounded by `LOOKUP_WORKERS`, under one `Deadline` of
-  `LOOKUP_TIMEOUT_SECONDS` per lookup, and every provider call stops at it. A provider that runs out of time
-  becomes a `LookupIssue`. Results are merged in record order, not completion order, so output is
-  deterministic.
+  `LOOKUP_TIMEOUT_SECONDS` per lookup, and every provider call stops at it, except under the two known limits
+  stated in [GAL-parallel.md](gal/GAL-parallel.md). A provider that runs out of time becomes a `LookupIssue`.
+  Results are merged in record order, not completion order, so output is deterministic.
 - **`explain(name)`** returns the scope rule that fired, the targets in scope, and the selector, plus each
   target's state and capabilities. It reads no value.
 
@@ -814,7 +818,8 @@ in it is `Final[str]`:
 
 - `LOOKUP_WORKERS: Final[int] = 8`: the most provider calls one lookup runs at once (`GAL-parallel`).
 - `LOOKUP_TIMEOUT_SECONDS: Final[float] = 20.0`: the time limit of one lookup, shared by every provider call it
-  starts; the value the 1Password CLI call already uses (`GAL-parallel`).
+  starts; the value the 1Password CLI call already uses (`GAL-settings`, for `CLI_TIMEOUT_SECONDS`; used by
+  `GAL-parallel`).
 - `TIMEOUT_REASON: Final[str] = "Lookup time limit reached"` and
   `TIMEOUT_NEXT_ACTION: Final[str] = "Check that the target is reachable, then retry"` (`GAL-parallel`).
 - `LOOKUP_SHUTDOWN_GRACE_SECONDS`, `LOOKUP_THREAD_PREFIX`, `NO_DEADLINE_REASON`, `NO_DEADLINE_NEXT_ACTION`, and
@@ -839,11 +844,11 @@ in it is `Final[str]`:
 - `UNKNOWN_PROVIDER_TYPE_MESSAGE: Final[str] = "Unknown provider type: {provider!r}"`: the literal
   `GemProvider.create` raises today, used by `create` and `GemProvider.expand` (`GAL-expand`).
 - `CANONICAL_JSON_SEPARATORS: Final[tuple[str, str]] = (",", ":")`: the separators of
-  `canonical_json.canonical_json` (`GAL-remember`).
+  `canonical_json.canonical_json` (`GAL-chooser`).
 - `DISCOVERY_LOCAL_OPTION: Final[str] = "include_local"`: the detection option the router passes to
   providers (`GAL-local-off`).
-- `DETECTION_LIFETIME_SECONDS` moves to `constants/remember.py`, with the other `GAL-remember` constants
-  listed in [GAL-remember.md](gal/GAL-remember.md#constants).
+- `DETECTION_LIFETIME_SECONDS` moves to `constants/remember.py`, with `PACKAGE_VERSION_UNKNOWN` and the other
+  `GAL-remember` constants listed in [GAL-remember.md](gal/GAL-remember.md#constants).
 
 `src/hiddengems/constants/platform.py`:
 
@@ -875,9 +880,11 @@ in it is `Final[str]`:
 - `DEFAULT_NAMESPACE: Final[str] = "default"`, `KUBECONFIG_ENV_VAR: Final[str] = "KUBECONFIG"`,
   `DEFAULT_KUBECONFIG: Final[str] = "~/.kube/config"`, `KUBE_DIRECTORY_NAME: Final[str] = ".kube"`, and
   `LOCAL_ALIAS: Final[str] = "local"`: moved literals.
+- `KUBECONFIG_PATHS_SETTING`, listed in [GAL-expand.md](gal/GAL-expand.md#constants-and-enums) (`GAL-expand`).
 - `MAX_KUBE_CONTEXTS: Final[int] = 64`: the same bound as directory entries (`GAL-kube-contexts`).
 - `ALL_CONTEXTS: Final[str] = "*"` (`GAL-kube-contexts`); the separator is `TARGET_NAME_SEPARATOR` of
   `GAL-expand`.
+- `CONTEXT_SETTING`, listed in [GAL-remember.md](gal/GAL-remember.md#constants) (`GAL-remember`).
 
 `src/hiddengems/gems/dotenv_constants.py` (`GAL-settings` unless noted):
 
@@ -885,25 +892,34 @@ in it is `Final[str]`:
   `DotEnvProvider` class attributes, which stay as the read path.
 - `DEFAULT_DOTENV_NAMES: Final[tuple[str, ...]] = (".env", ".env.*")`: the file-name patterns that reproduce
   today's `_is_dotenv_name` (`GAL-expand`).
+- `PATH_SETTING`, listed in [GAL-expand.md](gal/GAL-expand.md#constants-and-enums) (`GAL-expand`).
 - `DOTENV_FILE_MODE: Final[int] = 0o600`: the mode `HiddenDotFileGem` writes with, a move of today's literal
   (`GAL-chooser`).
 
-`src/hiddengems/gems/onepassword_constants.py` (`GAL-settings`):
+`src/hiddengems/gems/onepassword_constants.py` (`GAL-settings` unless noted):
 
 - `CLI_EXECUTABLE: Final[str] = "op"` and `INTEGRATION_NAME: Final[str] = "Hidden Gems"`: moved literals.
 - `CLI_TIMEOUT_SECONDS: Final[float] = LOOKUP_TIMEOUT_SECONDS`: replaces the literal `20`.
+- `ONEPASSWORD_SDK_NO_DEADLINE_REASON` and `ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION`, listed in
+  [GAL-parallel.md](gal/GAL-parallel.md#constants) (`GAL-parallel`).
+- `SDK_INSTALLED_SETTING` and `ONEPASSWORD_SDK_MODULE`, listed in [GAL-remember.md](gal/GAL-remember.md#constants)
+  (`GAL-remember`).
 
 `src/hiddengems/gems/keychain_constants.py` (`GAL-settings` unless noted):
 
 - `KEYCHAIN_OK: Final[int] = 0`, `KEYCHAIN_NOT_FOUND: Final[int] = 1`, and
-  `KEYCHAIN_ABI_VERSION: Final[int] = 1`: moved; they mirror `keychain_bridge.h`.
+  `KEYCHAIN_ABI_VERSION: Final[int] = 1`: moved; they mirror `keychain_bridge.h`. `keyring_provider.py` keeps
+  `_HG_KEYCHAIN_OK`, `_HG_KEYCHAIN_NOT_FOUND`, and `_HG_KEYCHAIN_ABI_VERSION` bound to these constants.
+  `tests/test_hidden_gems_keyring.py:32` reads `_HG_KEYCHAIN_ABI_VERSION` and `:55` reads `_HG_KEYCHAIN_OK`, so
+  those tests keep working unchanged.
 - Under Keychain option (a), `GAL-parallel` raises `KEYCHAIN_ABI_VERSION` to 2 and adds
-  `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int]`, the new bridge status, and `KEYCHAIN_LOCKED_NEXT_ACTION`,
+  `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`, the new bridge status, and `KEYCHAIN_LOCKED_NEXT_ACTION`,
   listed in [GAL-parallel.md](gal/GAL-parallel.md).
 - `LIBRARY_FILENAME: Final[str] = "libkeychainorpasswordread.dylib"` and
   `LIBRARY_NAME: Final[str] = "keychainorpasswordread"`: moved literals.
 - `BUILD_LIBRARY_DIRS: Final[tuple[str, ...]]`, holding `"cmake-build-debug/Debug"`,
   `"cmake-build-release/Release"`, and `"build"`: moved from `_library_candidates`.
+- `LIBRARY_SETTING`, listed in [GAL-remember.md](gal/GAL-remember.md#constants) (`GAL-remember`).
 
 `GAL-expand` also adds the pattern budget, cloud-sync guard, and walk-outcome constants and enums listed in
 [GAL-expand.md](gal/GAL-expand.md#constants-and-enums).
@@ -974,7 +990,9 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
   Behavior change: `HiddenGems` writes the `remembered` key of the config file, and a later `HiddenGems` reuses
   those records without detecting again while they stay current and valid. Relaxation: while a remembered entry
   is reused, an instance created after it was saved is not detected until `refresh=True`, a fingerprint change,
-  or the lifetime ends.
+  or the lifetime ends; an upgraded third-party provider is seen after `refresh=True`, a configuration change, or
+  the lifetime, because the fingerprint holds only the package version. A run from `src/` without an installed
+  distribution never remembers (`PACKAGE_VERSION_UNKNOWN`).
 - **`GAL-selector`: unknown selector key raises `InvalidSelectorError`.** Behavior change, strengthening. Today the
   result is `GemNotFoundError`, which hides the typo.
 - **`GAL-settings`: unknown settings key raises at config load.** Behavior change, strengthening. Today it is
@@ -988,7 +1006,7 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
   subclass `DeadlineAwareGemProvider`, `deadline_capability`, and `Capability.DEADLINE`; `find_gem` and
   `get_gem` keep their signatures. Compatibility choice for the owner: a provider whose `deadline_capability` is
   `UNSUPPORTED` runs in a child process that is terminated at the deadline (default), or is refused in parallel
-  lookup.
+  lookup. Under Keychain option (a), no lookup shows a Keychain prompt; an item that needs one is reported UNKNOWN.
 - **`GAL-discovery`: entry-point allowlist.** Strengthening. Third-party providers do not run unless listed.
   Behavior change: providers load sorted by `name`, so the built-in order becomes dotenv, keyring, kubernetes,
   onepassword.
@@ -1072,7 +1090,8 @@ entries inside a phase are in delivery order:
    2. `GAL-lint-clean`.
 2. **Contract.** Settle what a provider implements before anything builds on it.
    1. `GAL-plugin`. Rides along: its acceptance tests in `tests/contract/test_provider_contract.py`.
-   2. `GAL-settings`. Rides along: the constants modules of [Constants and limits](#47-constants-and-limits).
+   2. `GAL-settings`. Rides along: `constants/lookup.py`, `constants/config.py`, and the four
+      `gems/<provider>_constants.py` modules of [Constants and limits](#47-constants-and-limits).
    3. `GAL-selector`.
    4. `GAL-discovery`.
    5. `GAL-sdk-optional`, including the `UNSUPPORTED` and `ABSENT` states.
@@ -1110,7 +1129,8 @@ Every open point, with its options where there is more than one, a recommended d
 blocks. A default is a recommendation, not a decision; each entry stays open until the owner decides it.
 
 - **`GAL-plugin-contract`:** where `put_gem` lives, fully specified in [GAL-plugin.md](gal/GAL-plugin.md).
-  Options: keep it in `AbstractGemProvider`, which leaves `GAL-plugin` with no capability; or move it to
+  Options: keep it in `AbstractGemProvider`, where `GAL-plugin` still delivers the constants package, the
+  capability types, and the `tests/contract/` kit that later features build on; or move it to
   `WritableGemProvider`. A separate choice in the same file covers removing `abstract_provier.py`. Default:
   move `put_gem`, and remove the stale module in a separate cleanup. The same file also decides the legacy
   writer path (default: keep it, with a `DeprecationWarning`) and the read errors of `get_gem` (default: keep the
@@ -1154,7 +1174,7 @@ blocks. A default is a recommendation, not a decision; each entry stays open unt
 - **`GAL-class-preference`:** may one answer resolve every gem with the same found set `R(g)`, and how is that
   shown in `explain`?
   Default: not offered before `GAL-chooser` ships. Blocks: nothing yet.
-- **`GAL-secure-cache`:** proposed in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 3. The lifecycle
+- **`GAL-secure-cache`:** proposed in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 4. The lifecycle
   is settled there: one epoch per period with two random keys (`seal` and `index`), a fixed period of
   `CACHE_PERIOD_SECONDS` that configuration may shorten to no less than `CACHE_MIN_PERIOD_SECONDS`, and
   retirement in the order revoke, destroy key, delete records. Owner choices, with recommendations, in that
@@ -1266,7 +1286,7 @@ Status: locked.
 
 ### GAL-plugin
 
-Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 8. `put_gem` moves to `WritableGemProvider`, the
+Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 9. `put_gem` moves to `WritableGemProvider`, the
 read-only providers lose their stubs, and `hide_gem` raises `ProviderNotWritableError` before any call to a
 read-only provider. The hooks and shared types of revision 1 moved to the features that call them; that file's
 Scope lists where each one went.
@@ -1286,8 +1306,9 @@ Scope lists where each one went.
   - `KeyringSettings`: `library`.
 - **Router:** `HiddenGems.__init__` passes each configuration block to
   `GemProvider.check_settings(provider: str, settings: Mapping[str, Any]) -> Mapping[str, Any]`, which finds the
-  class by the lookup `GemProvider.create` uses and returns `settings_type().from_mapping(settings)`. The keys
-  the router adds itself (`preferences` and `DISCOVERY_LOCAL_OPTION`) are not part of the check.
+  class by the lookup `GemProvider.create` uses and returns `settings_type().from_mapping(settings)`. The key the
+  router adds itself, `preferences`, is not part of the check; `GAL-local-off` adds `DISCOVERY_LOCAL_OPTION` to
+  that exception.
 - **Class-level limits:** `DotEnvProvider._MAX_SCAN_ENTRIES`, `KubernetesProvider._MAX_AUTO_CONFIG_BYTES`, and
   `_MAX_DIRECTORY_ENTRIES` keep their class attribute as the read path, initialized from the new module
   constant, so the baseline tests that patch them keep working unchanged.
@@ -1323,14 +1344,16 @@ Scope lists where each one went.
     non-empty `name`. Two classes with the same `name` are both rejected. It returns the classes sorted by
     `name`, as `docs/README.md` "Detection result" orders by provider type name. Behavior change: the built-in
     order becomes dotenv, keyring, kubernetes, onepassword.
-  - `GemProvider.detect` and `GemProvider.create` gain `types: Sequence[type[AbstractGemProvider]] | None =
-    None`. `None` means `GemProvider.provider_types`.
+  - `GemProvider.detect`, `GemProvider.create`, and `GemProvider.check_settings` gain
+    `types: Sequence[type] | None = None`. `None` means `GemProvider.provider_types`.
 - **Moves:**
   - The literal tuple in `GemProvider.provider_types` becomes `load_provider_types()` of the built-ins, run at
     import.
   - The `import_module` workaround for `OnePasswordProvider` is removed.
 - **Router:** `HiddenGems.__init__` adds the allowlisted third-party types from `plugins.allow` once
-  `GAL-targets` exists. Until then only built-ins load.
+  `GAL-targets` exists. Until then only built-ins load. `HiddenGems.__init__` passes the same `types` to every
+  factory method that finds a class by name, including `expand` (`GAL-expand`), `revalidate` and
+  `detection_environment` (`GAL-remember`).
 - **`pyproject.toml`:** `[project.entry-points."hiddengems.providers"]` with
   `dotenv = "hiddengems.gems.dotenv_provider:DotEnvProvider"`,
   `kubernetes = "hiddengems.gems.k8s_provider:KubernetesProvider"`,
@@ -1393,19 +1416,22 @@ Scope lists where each one went.
 
 ### GAL-expand
 
-Specified in [GAL-expand.md](gal/GAL-expand.md), revision 4. A target expands only when its path is a pattern,
+Specified in [GAL-expand.md](gal/GAL-expand.md), revision 5. A target expands only when its path is a pattern,
 such as `~/clusters/*/kubeconfig`; a plain path names one file. A guard keeps every walk out of home-wide
 trees, cloud-sync folders, network mounts, and online-only files. Every declared location that yields nothing
 is reported ABSENT, and walk outcomes become enums.
 
-- **Blocked by:** `GAL-targets`, `GAL-sdk-optional`, `GAL-settings`, and `GAL-plugin`.
+- **Blocked by:** `GAL-targets`, `GAL-sdk-optional`, `GAL-discovery`, `GAL-settings`, `GAL-plugin`, and the
+  `GAL-expand` choices.
 
 ### GAL-local-off
 
-- **Files:** `~ hidden_gems.py`, `~ k8s_provider.py`, `~ dotenv_provider.py`.
+- **Files:** `~ hidden_gems.py`, `~ gem_provider.py`, `~ k8s_provider.py`, `~ dotenv_provider.py`,
+  `~ constants/config.py`.
 - **Change:**
   - `HiddenGems.__init__` passes `DISCOVERY_LOCAL_OPTION` set to `GemConfig.discovery_local` in each provider's
     detection options.
+  - `GemProvider.check_settings` leaves `DISCOVERY_LOCAL_OPTION` out of the check, as it does `preferences`.
   - `KubernetesProvider.candidate_clusters` adds the implicit `LOCAL_ALIAS` target only when the option is true.
   - `DotEnvProvider.detect` runs `_discovered_candidates` only when it is true.
 - **Existing tests changed:** none; new tests for `false` in the routing and dotenv test files.
@@ -1461,16 +1487,20 @@ is reported ABSENT, and walk outcomes become enums.
 ### GAL-chooser
 
 - **Files:** `~ abstraction.py`, `~ hidden_gems.py`, `~ config.py`, `+ src/hiddengems/chooser.py`,
-  `+ src/hiddengems/atomic_file.py`, `~ gems/dotenv_provider.py`, and `~ gems/dotenv_constants.py`
-  (`DOTENV_FILE_MODE`).
+  `+ src/hiddengems/atomic_file.py`, `~ constants/config.py` (`CONFIG_FILE_MODE`, `CANONICAL_JSON_SEPARATORS`),
+  `~ constants/lookup.py` (`CANDIDATE_KEY_SEPARATOR`), `+ src/hiddengems/canonical_json.py`,
+  `~ gems/dotenv_provider.py`, and `~ gems/dotenv_constants.py` (`DOTENV_FILE_MODE`).
 - **Move to `atomic_file.py`:** `_exclusive_write_lock` (`dotenv_provider.py:45-78`) and `_rewrite_file`
   (`dotenv_provider.py:80-103`) become `exclusive_write_lock(filename: Path) -> Iterator[None]` and
   `rewrite_file(filename: Path, contents: str, *, mode: int) -> Iterator[Path]`. Today's literal `0o600`
   becomes the `mode` argument, `DOTENV_FILE_MODE` for `HiddenDotFileGem`. `GAL-remember` and
   `GAL-secure-cache` import the module.
 - **New names:**
+  - `canonical_json(value: object) -> str` in `canonical_json.py`: returns
+    `json.dumps(value, sort_keys=True, separators=CANONICAL_JSON_SEPARATORS, default=str)`. `GAL-remember` and
+    `GAL-secure-cache` import it.
   - `candidate_key(reference: GemReference) -> str` in `abstraction.py`: `reference.instance_id`, then
-    `CANDIDATE_KEY_SEPARATOR`, then the location as JSON with sorted keys.
+    `CANDIDATE_KEY_SEPARATOR`, then `canonical_json(reference.location)`.
   - The property `LookupResult.candidates -> dict[str, GemReference]`.
   - `resolve_gem` and `dig_gem` gain `choice: str | None = None`, a key of `candidates` that reads exactly that
     location, and `remember: bool = False`, which saves the choice through `save_preference`.
@@ -1512,13 +1542,15 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 4. It replaces the earlier entry here, which
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 5. It replaces the earlier entry here, which
 bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
-`cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline`,
-a timeout becomes a `LookupIssue`, matches merge in record order, and shutdown waits only for calls that are
-themselves bounded.
+`cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline` (the
+Keychain under Keychain option (a)), a timeout becomes a `LookupIssue`, matches merge in record order, and
+shutdown waits for every running call, which is bounded except under the two known limits that file states: a
+slow but steady Kubernetes response and a declared dotenv file on an unresponsive mount.
 
-- **Blocked by:** `GAL-plugin` and `GAL-settings`.
+- **Blocked by:** `GAL-plugin`, `GAL-settings`, `GAL-scope`, `GAL-chooser`, `GAL-discovery` under non-cooperative
+  option (b), and the `GAL-parallel` choices.
 
 ### GAL-cli-detect
 
@@ -1561,12 +1593,14 @@ themselves bounded.
 
 ### GAL-remember
 
-Specified in [GAL-remember.md](gal/GAL-remember.md), revision 4. `AbstractGemProvider` gains `invalidate()`,
+Specified in [GAL-remember.md](gal/GAL-remember.md), revision 5. `AbstractGemProvider` gains `invalidate()`,
 a no-op by default, and `CachingGemProvider` implements the cache lifecycle once for providers that keep
-state. `HiddenGems.invalidate()` calls the declared hook on every instance. Detection is remembered in the
-config file and reused only while its fingerprint is current and every record revalidates.
+state. `HiddenGems.invalidate()` calls the declared hook on every `AbstractGemProvider` instance and collects a
+`TypeError` for any other instance. Detection is remembered in the config file and reused only while its
+fingerprint is current and every record revalidates.
 
-- **Blocked by:** `GAL-plugin`, whose `tests/contract/` kit this feature extends.
+- **Blocked by:** `GAL-plugin`, `GAL-settings`, `GAL-discovery`, `GAL-targets`, `GAL-expand`, `GAL-chooser`,
+  and the `GAL-remember` choices.
 
 ### GAL-verify
 
@@ -1594,7 +1628,7 @@ config file and reused only while its fingerprint is current and every record re
 
 ### GAL-secure-cache
 
-Specified in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 3. An opt-in `HiddenGems(cache=...)` holds
+Specified in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 4. An opt-in `HiddenGems(cache=...)` holds
 resolved values encrypted for a fixed period, so repeated `dig_gem` calls for an unchanged request make no
 `find_gem` or `get_gem` call. `dig_gem(refresh=True)`, `hide_gem`, and `HiddenGems.invalidate()` end a cached
 choice. The cache is a separate contract; `AbstractGemProvider`, the factory, and the providers are unchanged.
