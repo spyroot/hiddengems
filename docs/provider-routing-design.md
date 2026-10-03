@@ -898,9 +898,10 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
 - **`GAL-sdk-optional`: a supported provider that detected nothing reports `ABSENT`.** Behavior change:
   `LookupResult.providers` showed `None` for it before.
 - **`GAL-expand`: `AbstractGemProvider` gains the non-abstract `expand()` hook, dispatched by
-  `GemProvider.expand`; declared patterns expand under a guard.** Contract extension. Behavior changes: implicit dotenv discovery skips cloud-sync folders and reports
-  the skip; a declared plain path that names a directory raises `ValueError` instead of being dropped; a
-  declared location that yields nothing is reported ABSENT.
+  `GemProvider.expand`; declared patterns expand under a guard.** Contract extension. Behavior changes:
+  implicit dotenv discovery skips cloud-sync folders and reports the skip; a declared plain path that names a
+  directory raises `ValueError` instead of being dropped; a declared location that yields nothing is reported
+  ABSENT.
 - **`GAL-remember`: `AbstractGemProvider` gains `invalidate()`, `revalidate()`, and `environment_names`, all
   with defaults; `CachingGemProvider` holds the shared cache lifecycle.** Contract extension. Behavior change:
   `HiddenGems` writes the `remembered` key of the config file, and a later `HiddenGems` reuses those records
