@@ -1,8 +1,16 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 4. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 5 aligns this proposal with the second round of decisions. `_resolve_within` takes no `remember`;
+`resolve_gem` and `dig_gem` apply it after `_resolve_within` returns. `LOOKUP_TIMEOUT_SECONDS` comes from
+`GAL-settings`, which also moves `KEYCHAIN_ABI_VERSION`; Keychain option (a) raises it to 2, and `keyring_provider.py`
+keeps the names the keyring tests read. The 1Password SDK fallback uses its own `ONEPASSWORD_SDK_NO_DEADLINE_*`
+constants, both declarations of `KEYCHAIN_INTERACTION_NOT_ALLOWED` give the value 3, and under Keychain option (a)
+no lookup shows a Keychain prompt. `GAL-scope` and `GAL-chooser` are listed as requirements, and the router's gate
+entries name their acceptance tests.
 
 Revision 4 aligns names, modules, and dependencies with the other feature proposals:
 
@@ -18,7 +26,8 @@ Revision 4 aligns names, modules, and dependencies with the other feature propos
   `GAL-discovery`.
 - Keychain option (a) names its native files and constants and raises `KEYCHAIN_ABI_VERSION` from 1 to 2. Under
   Keychain option (b), `KeyringProvider` is `UNSUPPORTED`.
-- If the SDK test fails, an SDK-only 1Password instance raises `NO_DEADLINE_REASON` under a finite deadline.
+- If the SDK test fails, an SDK-only 1Password instance raises `ONEPASSWORD_SDK_NO_DEADLINE_REASON` under a finite
+  deadline.
 - The Purpose states the two known limits, `GAL-secure-cache` is listed as a dependent, and the baseline trace notes
   that patched class limits keep working.
 
@@ -94,6 +103,7 @@ Out of scope:
 ~ src/hiddengems/gems/dotenv_provider.py         find_gem_within, get_gem_within
 ~ src/hiddengems/gems/k8s_provider.py            find_gem_within, get_gem_within; per-request budget
 ~ src/hiddengems/gems/onepassword_provider.py    find_gem_within, get_gem_within; CLI and SDK budgets
+~ src/hiddengems/gems/onepassword_constants.py   ONEPASSWORD_SDK_NO_DEADLINE_* constants
 ~ src/hiddengems/gems/keyring_provider.py        find_gem_within, get_gem_within; per the Keychain decision
 ~ src/hiddengems/gems/keychain_constants.py      Keychain option (a): KEYCHAIN_* constants
 ~ src/hiddengems/gems/keychain_bridge.h          Keychain option (a): interaction-not-allowed status
@@ -174,9 +184,11 @@ Out of scope:
 - **New: `HiddenGems._resolve_within(self, name: str, *, provider: str | None, target: str | None, criteria:
   Mapping[str, Any] | None, choice: str | None, deadline: Deadline) -> GemReference`,** private. `choice` is the
   parameter `GAL-chooser` (plan 4.3) adds to `resolve_gem`. It holds today's body of `resolve_gem` and calls
-  `_inspect_within` with the same deadline.
+  `_inspect_within` with the same deadline. It takes no `remember`: `resolve_gem` and `dig_gem` apply `remember` of
+  `GAL-chooser` themselves, through `save_preference`, after `_resolve_within` returns.
 - **`HiddenGems.dig_gem`** creates one `deadline = Deadline.after(LOOKUP_TIMEOUT_SECONDS)` and passes it to
-  `_resolve_within` and to the read of the selected reference. The read chooses by `deadline_capability`:
+  `_resolve_within` and to the read of the selected reference. It applies `remember` of `GAL-chooser` itself,
+  through `save_preference`, after `_resolve_within` returns. The read chooses by `deadline_capability`:
   - `SUPPORTED` and `UNKNOWN` call `get_gem_within(reference, deadline=deadline)`;
   - `UNSUPPORTED` follows the [non-cooperative provider decision](#alternatives-for-the-owners-decision).
 
@@ -266,11 +278,17 @@ baseline is commit `4438234`.
 - **Status:** behavior change.
 - **Behavior:** the steps listed under `src/hiddengems/hidden_gems.py` above. `inspect_gem` and `resolve_gem`
   delegate with `Deadline.after(LOOKUP_TIMEOUT_SECONDS)`; `dig_gem` creates one deadline for `_resolve_within` and
-  the read.
+  the read. `_resolve_within` takes no `remember`: `resolve_gem` and `dig_gem` apply `remember` of `GAL-chooser`
+  themselves, through `save_preference`, after `_resolve_within` returns.
 - **Implementation owner:** `hidden_gems.py`.
 - **Actual caller:** the caller of the library.
-- **Acceptance tests:** every case in `tests/test_hidden_gems_routing.py` below, and the existing routing tests,
-  unchanged.
+- **Acceptance tests:** `test_unchecked_onepassword_does_not_silently_return_old_keyring` (both parameter values),
+  `test_parallel_lookup_never_exceeds_lookup_workers`, `test_parallel_merge_ignores_completion_order`,
+  `test_timed_out_call_stops_and_lookup_shuts_down`, `test_non_cooperative_provider_never_runs_unbounded`,
+  `test_lookup_with_no_records_skips_the_pool`, and, unchanged,
+  `test_detection_runs_once_and_list_valued_gem_stays_nested`,
+  `test_namespace_only_preference_resolves_unique_cluster`, and
+  `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`.
 
 #### `HiddenGems._inspect_within` and `HiddenGems._resolve_within`
 
@@ -285,7 +303,10 @@ baseline is commit `4438234`.
 - **Actual caller:** `HiddenGems.inspect_gem` calls `_inspect_within`; `HiddenGems.resolve_gem` and
   `HiddenGems.dig_gem` call `_resolve_within`, which calls `_inspect_within`.
 - **Acceptance tests:** `test_timed_out_call_stops_and_lookup_shuts_down`,
-  `test_lookup_with_no_records_skips_the_pool`, and the existing routing tests, unchanged.
+  `test_lookup_with_no_records_skips_the_pool`, and, unchanged,
+  `test_detection_runs_once_and_list_valued_gem_stays_nested`,
+  `test_namespace_only_preference_resolves_unique_cluster`, and
+  `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`.
 
 #### `HiddenGems._find_in_child` and `HiddenGems._get_in_child`
 
@@ -308,10 +329,12 @@ baseline is commit `4438234`.
 
 - **Signature:** in `gems/keychain_constants.py`, which `GAL-settings` creates:
   `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`, mirroring the new `HG_KEYCHAIN_INTERACTION_NOT_ALLOWED = 3`
-  after `HG_KEYCHAIN_ERROR = 2` in `keychain_bridge.h`; `KEYCHAIN_ABI_VERSION: Final[int] = 2`,
-  moved from `_HG_KEYCHAIN_ABI_VERSION = 1` at `keyring_provider.py:29` and raised from 1 to 2; and
-  `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`. The status is
-  added to `keychain_bridge.h`, and `keychain_bridge.cpp` and `keychain_reader.cpp` return it.
+  after `HG_KEYCHAIN_ERROR = 2` in `keychain_bridge.h`; `KEYCHAIN_ABI_VERSION: Final[int] = 2`, moved by
+  `GAL-settings` from `_HG_KEYCHAIN_ABI_VERSION = 1` at `keyring_provider.py:29`, and raised here from 1 to 2; and
+  `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`.
+  `keyring_provider.py` keeps `_HG_KEYCHAIN_ABI_VERSION` and `_HG_KEYCHAIN_OK` bound to `KEYCHAIN_ABI_VERSION` and
+  `KEYCHAIN_OK`, because `tests/test_hidden_gems_keyring.py:32,55` reads them. The status is added to
+  `keychain_bridge.h`, and `keychain_bridge.cpp` and `keychain_reader.cpp` return it.
 - **Status:** MUST ADD under Keychain option (a) only.
 - **Behavior:** the native read asks the Keychain not to prompt. A locked or authorization-gated item returns
   `KEYCHAIN_INTERACTION_NOT_ALLOWED` at once, and `KeyringProvider` reports it as UNKNOWN with
@@ -366,6 +389,11 @@ None. Each of the nine baseline routing tests, traced through the new code:
 `test_unchecked_onepassword_does_not_silently_return_old_keyring` also gains a second parameter value with the
 same assertions.
 
+The keyring tests at `tests/test_hidden_gems_keyring.py:32,55` read `_HG_KEYCHAIN_ABI_VERSION` and
+`_HG_KEYCHAIN_OK`. They keep working, because `keyring_provider.py` keeps both names bound to `KEYCHAIN_ABI_VERSION`
+and `KEYCHAIN_OK`. Their fake library returns `keyring._HG_KEYCHAIN_ABI_VERSION` as its ABI version, so raising it
+to 2 under Keychain option (a) does not break them.
+
 ### 5. Baseline
 
 The baseline stays commit `4438234`. This proposal does not redefine `B`.
@@ -393,7 +421,8 @@ No new class. Each situation reuses an existing one, under the overview's except
 
 In `src/hiddengems/constants/lookup.py`, beside the constants the overview already lists:
 
-- `LOOKUP_WORKERS: Final[int] = 8` and `LOOKUP_TIMEOUT_SECONDS: Final[float] = 20.0`, as in the overview.
+- `LOOKUP_WORKERS: Final[int] = 8`, added by this feature. `LOOKUP_TIMEOUT_SECONDS: Final[float] = 20.0` is added by
+  `GAL-settings` with `CLI_TIMEOUT_SECONDS`; this feature uses it.
 - `LOOKUP_SHUTDOWN_GRACE_SECONDS: Final[float] = 1.0`: the time a cooperative call has to notice its deadline and
   return. The acceptance bound is the timeout plus this grace.
 - `LOOKUP_THREAD_PREFIX: Final[str] = "hiddengems-lookup"`: names the worker threads, so a test can show that
@@ -401,11 +430,11 @@ In `src/hiddengems/constants/lookup.py`, beside the constants the overview alrea
 - `TIMEOUT_REASON` and `TIMEOUT_NEXT_ACTION`, as in the overview.
 - `NO_DEADLINE_REASON: Final[str] = "Provider cannot honor a lookup deadline"` and
   `NO_DEADLINE_NEXT_ACTION: Final[str] = "Subclass DeadlineAwareGemProvider"`, used under non-cooperative
-  option (a), under option (b) for a class that pickle cannot reference by name, and by `OnePasswordProvider` for
-  an SDK-only instance if `test_onepassword_sdk_work_ends_at_the_deadline` does not pass.
+  option (a) and, under option (b), for a class that pickle cannot reference by name.
 - `CHILD_START_METHOD: Final[str] = "spawn"`, used only under non-cooperative option (b).
 
-In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants:
+In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants. Under
+`GAL-plugin` option one, which adds no write constants, this feature creates the module:
 
 - `DEADLINE_SUPPORTED_REASON: Final[str] = "Subclasses DeadlineAwareGemProvider"`.
 - `DEADLINE_LEGACY_REASON: Final[str] = "Resolves find_gem_within and get_gem_within without subclassing
@@ -416,11 +445,21 @@ In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside 
 - `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without subclassing
   DeadlineAwareGemProvider; subclass it to keep parallel lookup"`.
 
+In `gems/onepassword_constants.py`, which `GAL-settings` creates:
+
+- `ONEPASSWORD_SDK_NO_DEADLINE_REASON: Final[str] = "The 1Password SDK cannot stop at a lookup deadline"` and
+  `ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION: Final[str] = "Install or enable the 1Password CLI for this account, then
+  retry"`, used by `OnePasswordProvider` for an SDK-only instance under a finite deadline if
+  `test_onepassword_sdk_work_ends_at_the_deadline` does not pass.
+
 In `src/hiddengems/gems/keychain_constants.py`, which `GAL-settings` creates, under Keychain option (a) only:
 
-- `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int]`: the new bridge status.
-- `KEYCHAIN_ABI_VERSION: Final[int] = 2`: moved from `_HG_KEYCHAIN_ABI_VERSION = 1` at `keyring_provider.py:29`
-  and raised from 1 to 2.
+- `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`: the new bridge status, mirroring
+  `HG_KEYCHAIN_INTERACTION_NOT_ALLOWED = 3`.
+- `KEYCHAIN_ABI_VERSION: Final[int] = 2`: moved by `GAL-settings` from `_HG_KEYCHAIN_ABI_VERSION = 1` at
+  `keyring_provider.py:29`, and raised here from 1 to 2. `keyring_provider.py` keeps `_HG_KEYCHAIN_ABI_VERSION` and
+  `_HG_KEYCHAIN_OK` bound to `KEYCHAIN_ABI_VERSION` and `KEYCHAIN_OK`, because
+  `tests/test_hidden_gems_keyring.py:32,55` reads them.
 - `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`.
 
 ## Libraries
@@ -467,9 +506,10 @@ The Keychain, whose query can wait on an authorization prompt:
 
 - **(a) Query without interactive UI.** The native read asks the Keychain not to prompt. A locked or
   authorization-gated item then returns at once and is reported UNKNOWN, with the next action
-  `KEYCHAIN_LOCKED_NEXT_ACTION`. This changes the native bridge and raises `KEYCHAIN_ABI_VERSION` from 1 to 2;
-  the proposed Keychain existence feature builds on version 2. Recommended: a parallel lookup never waits on a
-  dialog.
+  `KEYCHAIN_LOCKED_NEXT_ACTION`. No lookup then shows a Keychain prompt; an item that needs one is reported UNKNOWN
+  with `KEYCHAIN_LOCKED_NEXT_ACTION` and is never cached by `GAL-secure-cache`. This changes the native bridge and
+  raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain existence feature builds on version 2.
+  Recommended: a parallel lookup never waits on a dialog.
 - **(b) Treat the Keychain as non-cooperative.** `KeyringProvider` does not subclass `DeadlineAwareGemProvider`
   and is `UNSUPPORTED`. It goes through the chosen non-cooperative path, and its prompt can still appear until the
   deadline ends it.
@@ -552,10 +592,13 @@ In `tests/contract/test_provider_contract.py`:
 - **Requires:**
   - `GAL-plugin`, for `Capability`, `CapabilityObservation`, `EvidenceSource.PROVIDER_CLASS`, and
     `constants/capability.py`;
-  - `GAL-settings`, which introduces `constants/lookup.py` and `gems/keychain_constants.py`;
+  - `GAL-settings`, which introduces `constants/lookup.py` with `LOOKUP_TIMEOUT_SECONDS`,
+    `gems/keychain_constants.py`, and `gems/onepassword_constants.py`;
+  - `GAL-scope` (plan 4.1) and `GAL-chooser` (plan 4.3), whose `target` and `choice` parameters `_inspect_within` and
+    `_resolve_within` take;
   - `GAL-discovery` under non-cooperative option (b), for `GemProvider.create(record, types=(provider_type,))`.
 - **Required by:** `GAL-secure-cache`, which uses `Deadline`, its injected clock, `_resolve_within`,
-  `get_gem_within`, `LOOKUP_TIMEOUT_SECONDS`, and `TIMEOUT_NEXT_ACTION`.
+  `get_gem_within`, and `TIMEOUT_NEXT_ACTION`.
 - **Overlaps:** Keychain option (a) changes the native bridge, as the proposed Keychain existence feature does.
   Under Keychain option (a), this feature raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain
   existence feature builds on version 2.
