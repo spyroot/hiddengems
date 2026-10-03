@@ -835,7 +835,7 @@ in it is `Final[str]`:
   `TIMEOUT_NEXT_ACTION: Final[str] = "Check that the target is reachable, then retry"` (`GAL-parallel`).
 - `LOOKUP_SHUTDOWN_GRACE_SECONDS`, `LOOKUP_THREAD_PREFIX`, `NO_DEADLINE_REASON`, `NO_DEADLINE_NEXT_ACTION`,
   `CHILD_TRANSPORT_REASON`, `CHILD_TRANSPORT_NEXT_ACTION`, `CHILD_LINGERING_REASON`, `CHILD_LINGERING_NEXT_ACTION`,
-  `CHILD_ERROR_MESSAGE`, `CHILD_EXIT_MESSAGE`, and `CHILD_START_METHOD`, listed in
+  `CHILD_ERROR_MESSAGE`, `CHILD_EXIT_MESSAGE`, `CHILD_RECEIVER_THREAD_NAME`, and `CHILD_START_METHOD`, listed in
   [GAL-parallel.md](gal/GAL-parallel.md#constants) (`GAL-parallel`).
 - `CANDIDATE_KEY_SEPARATOR: Final[str] = "#"`: joins instance id and location in a candidate key
   (`GAL-chooser`).
@@ -1613,7 +1613,7 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 7. It replaces the earlier entry here, which
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 8. It replaces the earlier entry here, which
 bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
 `cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline` (the
 Keychain under Keychain option (a)), a timeout becomes a `LookupIssue`, matches merge in record order, and
