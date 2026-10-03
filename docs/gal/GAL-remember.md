@@ -1,9 +1,14 @@
 # GAL-remember: remembered detection and provider invalidation
 
-Status: proposal, revision 1. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 2. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
 [Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate).
+
+Revision 2 adds the [Exceptions](#exceptions) section required by the overview's
+[exception rules](../provider-routing-design.md#exception-consistency). It also corrects how this feature
+relates to `GAL-secure-cache`: that cache sits at the router through its own contract, does not subclass
+`CachingGemProvider`, and shares no storage with remembered detection.
 
 ## Purpose and observable capability
 
@@ -56,8 +61,8 @@ Added beyond the minimum, each needed by a rule of `docs/README.md`:
 Out of scope:
 
 - a configuration key that lowers `DETECTION_LIFETIME_SECONDS`: `GAL-targets`, in its schema;
-- the secure value cache: `GAL-secure-cache`. If approved, it makes `KeyringProvider` and `OnePasswordProvider`
-  subclasses of `CachingGemProvider` and declares their `_release`;
+- the secure value cache: `GAL-secure-cache`. It caches in front of provider reads at the router, through its
+  own contract, and stores nothing in `~/.gem_provider.json`. It adds one step to `HiddenGems.invalidate`;
 - expansion caching: none is needed. Expanded targets (`GAL-expand`) are part of the detection result, so they
   are remembered and invalidated with it.
 
@@ -128,8 +133,9 @@ names are listed under [Acceptance cases](#acceptance-cases).
     `ExceptionGroup(CACHE_RELEASE_FAILED_MESSAGE.format(count=len(errors)), errors)`.
   - A subclass supplies only `_release`, and only when a cached value holds a resource that must be closed.
 - **Implementation owner:** `CachingGemProvider` in `abstract_provider.py`. At delivery no `p ∈ P` subclasses
-  it. Its consumer at delivery is `CachingEnvironmentProvider` in `tests/contract/example_providers.py`, and
-  `GAL-secure-cache` is its first proposed built-in consumer.
+  it. Its consumer at delivery is `CachingEnvironmentProvider` in `tests/contract/example_providers.py`. It
+  exists because the owner's minimum requires one shared lifecycle for any provider that keeps state; no
+  built-in provider does at `4438234`.
 - **Actual caller:** `HiddenGems.invalidate` through `AbstractGemProvider.invalidate`; the subclass's own
   lookups call `_cached`.
 - **Acceptance tests:** C3, C4, C5, C6.
@@ -359,6 +365,28 @@ additions that no baseline test calls.
 
 The baseline stays commit `4438234`. This proposal changes no member of `B` and does not redefine `B`.
 
+## Exceptions
+
+One new class, and four reuses, under the overview's exception rules:
+
+- **New: `RememberedStoreWarning(UserWarning)`,** in `detection_cache.py`.
+  - Emitted when the remembered entry cannot be saved, or is deliberately not saved: an `OSError` on write, a
+    `scan_issue` record, or a setting that cannot be encoded. Construction continues with the detected records.
+  - Needed because a caller, or a test, must filter this warning without matching its text. Remembered
+    detection is an optimization; losing it must never fail a lookup, so it is a warning and not an error.
+  - Closest existing classes: none in `E_B` is a warning. Plain `UserWarning` cannot be filtered apart from other
+    libraries' warnings.
+  - Message and attributes name the path, the error class, and the provider and instance id. They never
+    include a setting's value.
+  - Cases: R9, R12, R14.
+- **Reused: built-in `ExceptionGroup`,** raised by `HiddenGems.invalidate` and `CachingGemProvider.invalidate`
+  after every step has run. It carries each original exception unchanged, which no single class can.
+- **Reused: `TypeError`,** raised by `CachingGemProvider.__init_subclass__` when a subclass overrides
+  `invalidate`. A wrong class definition is a type error.
+- **Reused: `OSError`,** from the file system, caught in `HiddenGems.__init__` and turned into the warning above.
+- **Not raised:** `load_remembered` returns a status for every content problem, and `revalidate` returns a
+  `Revalidation`; neither raises for a remembered entry that is missing, malformed, or stale.
+
 ## Constants
 
 `src/hiddengems/constants/remember.py`:
@@ -500,4 +528,4 @@ real secret. None has been run, because nothing is implemented.
 - **Shares constants with:** `GAL-discovery` (`BUILTIN_DISTRIBUTION`) and `GAL-settings`
   (`kubernetes_constants.py`).
 - **Used by:** `GAL-chooser`, whose `remember=True` writes through `atomic_file.py`, and `GAL-secure-cache`,
-  whose value cache subclasses `CachingGemProvider`.
+  which adds a step to `HiddenGems.invalidate` and writes its files through `atomic_file.rewrite_file`.
