@@ -202,7 +202,7 @@ Out of scope:
 
   Contract, in two parts, each bounded by the deadline plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`:
   - **Return:** the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
-    or with `CHILD_LINGERING_REASON`, within that time.
+    or with `CHILD_LINGERING_REASON` or `CHILD_RECEIVER_REASON`, within that time.
   - **Execution:** every thread, request, and process the call starts has ended within that time.
 
   The named exceptions, each tied to an owner's choice in the
@@ -503,9 +503,10 @@ baseline is commit `4438234`.
   | nothing complete | confirmed; receiver alive | raises `ProviderLookupError` with `CHILD_RECEIVER_REASON` |
   | any | not confirmed | raises `ProviderLookupError(CHILD_LINGERING_REASON, CHILD_LINGERING_NEXT_ACTION)` |
 
-  The parent unpickles an outcome only in a confirmed row. When the exit is not confirmed, a received outcome is
-  discarded without being unpickled: its value is never returned, stored, or logged. No payload limit applies; a
-  frame that is still arriving at the deadline counts as nothing complete.
+  In the `None` row, `exitcode` is `None` when only the sentinel confirmed the exit. The parent unpickles an
+  outcome only in a confirmed row. When the exit is not confirmed, a received outcome is discarded without being
+  unpickled: its value is never returned, stored, or logged. No payload limit applies; a frame that is still
+  arriving at the deadline counts as nothing complete.
 
   A receiver thread that is still alive after a confirmed exit is waiting on a pipe whose end of file it has not
   read: another process still holds the pipe open, such as one the provider forked without exec, or the thread
@@ -900,10 +901,10 @@ In `tests/test_hidden_gems_routing.py`:
     ready. Its `Pipe` gives a receiving end whose `recv_bytes` blocks until the test releases it. A spy wraps
     `multiprocessing.active_children`.
   - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_LINGERING_REASON` within 0.2 seconds plus
-    `CHILD_EXIT_GATE_SECONDS`; `kill` was called; the exit is still unconfirmed when the call returns, and the
-    receiver thread is still blocked, so the return is not taken as a confirmed exit. After the test releases the
-    fake, the receiver thread ends, and a second `run_in_child` call calls `multiprocessing.active_children()` before
-    it starts its child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
+    `CHILD_EXIT_GATE_SECONDS`; `kill` was called exactly once; the exit is still unconfirmed when the call returns,
+    and the receiver thread is still blocked, so the return is not taken as a confirmed exit. After the test
+    releases the fake, the receiver thread ends, and a second `run_in_child` call calls
+    `multiprocessing.active_children()` before it starts its child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
     `TIMEOUT_REASON` and a set `exitcode`.
 - `test_child_result_requires_confirmed_exit_before_return`, under non-cooperative option (b) or dotenv option (b).
   - Input: the fake context of the case above, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake
@@ -917,18 +918,23 @@ In `tests/test_hidden_gems_routing.py`:
   - Input: the fake context, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake writes only the
     frame header of a larger message into the sending end and keeps a duplicate of that end's descriptor open, so
     the receiving end blocks waiting for the body. The fake `Process` is alive until its `kill`, which closes the
-    duplicate, sets `exitcode`, and makes its sentinel ready. A second run pauses the receiver thread after the
-    end of file arrives, for less than half of `CHILD_EXIT_GATE_SECONDS`, before it returns.
+    duplicate, sets `exitcode`, and makes its sentinel ready. In a second run the fake `join(timeout)` waits out
+    its whole timeout before the exit becomes visible, so the process phase spends all of its half of the gate;
+    the receiver thread then pauses after the end of file arrives, for a quarter of `CHILD_EXIT_GATE_SECONDS`,
+    before it returns.
   - Expected: the fake recorded the header write before step 3 began; in both runs `run_in_child` raises
     `ProviderLookupError` with `TIMEOUT_REASON` within 0.2 seconds plus `CHILD_EXIT_GATE_SECONDS`, and afterwards no
-    thread named `CHILD_RECEIVER_THREAD_NAME` is alive, so the receiver phase had its reserved time. Revision 7, which
+    thread named `CHILD_RECEIVER_THREAD_NAME` is alive. The second run passes only because the receiver phase keeps
+    its own half of the gate: with one shared gate, the process phase would leave the receiver no time, and the call
+    would raise `CHILD_RECEIVER_REASON`. Revision 7, which
     called `recv_bytes` after a timed `poll`, would block in `recv_bytes` here; the test runs the call in a helper
     thread joined with a bound, so such a regression fails instead of hanging.
 - `test_child_exit_does_not_imply_receiver_exit`, under non-cooperative option (b) or dotenv option (b).
   - Input: the fake context of the case above, but its receiving end's `recv_bytes` keeps blocking after the fake
     child exits (`exitcode` set, sentinel ready) until the test releases it, as when another process holds the pipe.
   - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_RECEIVER_REASON`, not `TIMEOUT_REASON` or
-    `CHILD_LINGERING_REASON`, within 0.2 seconds plus `CHILD_EXIT_GATE_SECONDS`. The receiver thread is still alive
+    `CHILD_LINGERING_REASON`, within 0.2 seconds plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`, so before the router's wait
+    for it ends. The receiver thread is still alive
     when the call returns; after the test releases it, the thread ends and the receiving end is closed.
 - `test_run_in_child_with_an_expired_deadline_starts_no_child`.
   - Input: the fake context and a deadline that has already expired.
