@@ -263,7 +263,7 @@ Status values:
 | Feature | Change to `B` | Change to the factory | Status |
 | --- | --- | --- | --- |
 | `GAL-plugin` | `put_gem` moves to `WritableGemProvider` | none | Declared |
-| `GAL-expand` | classmethod `expand()`, not abstract | none | Declared |
+| `GAL-expand` | classmethod `expand()`, not abstract | `expand()` | Declared |
 | `GAL-parallel` | subclass `DeadlineAwareGemProvider` | none | Declared |
 | `GAL-remember` | `invalidate`, `revalidate`, `environment_names`; `CachingGemProvider` | `revalidate()` | Declared |
 | `GAL-settings` | `settings_type()` | none | Locked |
@@ -434,7 +434,7 @@ Nothing is rewritten wholesale.
 +   constants/platform.py                    GAL-sdk-optional
 +   constants/remember.py                    GAL-remember
 +   detection_cache.py                       GAL-remember
-~   gem_provider.py                          GAL-discovery, GAL-sdk-optional, GAL-remember
+~   gem_provider.py                          GAL-discovery, GAL-sdk-optional, GAL-expand, GAL-remember
 ~   hidden_gems.py                           GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-targets, GAL-local-off,
                                              GAL-scope, GAL-routing, GAL-chooser, GAL-explain,
                                              GAL-write-target, GAL-parallel, GAL-remember, GAL-verify,
@@ -468,7 +468,6 @@ Nothing is rewritten wholesale.
 +   frozen_docs.bats                         GAL-readme-frozen
 +   test_hidden_gems_cli.py                  GAL-cli-detect
 +   test_hidden_gems_config.py               GAL-targets
-+   test_hidden_gems_expand.py               GAL-expand
 ~   test_hidden_gems_dotenv.py               named in each feature's entry
 ~   test_hidden_gems_keyring.py              named in each feature's entry
 ~   test_hidden_gems_package.py              GAL-discovery, GAL-sdk-optional
@@ -898,8 +897,8 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
   unchanged.
 - **`GAL-sdk-optional`: a supported provider that detected nothing reports `ABSENT`.** Behavior change:
   `LookupResult.providers` showed `None` for it before.
-- **`GAL-expand`: `AbstractGemProvider` gains the non-abstract `expand()` hook; declared patterns expand under a
-  guard.** Contract extension. Behavior changes: implicit dotenv discovery skips cloud-sync folders and reports
+- **`GAL-expand`: `AbstractGemProvider` gains the non-abstract `expand()` hook, dispatched by
+  `GemProvider.expand`; declared patterns expand under a guard.** Contract extension. Behavior changes: implicit dotenv discovery skips cloud-sync folders and reports
   the skip; a declared plain path that names a directory raises `ValueError` instead of being dropped; a
   declared location that yields nothing is reported ABSENT.
 - **`GAL-remember`: `AbstractGemProvider` gains `invalidate()`, `revalidate()`, and `environment_names`, all
@@ -1184,7 +1183,7 @@ Status: locked.
 
 ### GAL-plugin
 
-Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 5. `put_gem` moves to `WritableGemProvider`, the
+Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 6. `put_gem` moves to `WritableGemProvider`, the
 read-only providers lose their stubs, and `hide_gem` raises `ProviderNotWritableError` before any call to a
 read-only provider. The hooks and shared types of revision 1 moved to the features that call them; that file's
 Scope lists where each one went.
@@ -1460,7 +1459,7 @@ themselves bounded.
 
 ### GAL-remember
 
-Specified in [GAL-remember.md](gal/GAL-remember.md), revision 1. `AbstractGemProvider` gains `invalidate()`,
+Specified in [GAL-remember.md](gal/GAL-remember.md), revision 2. `AbstractGemProvider` gains `invalidate()`,
 a no-op by default, and `CachingGemProvider` implements the cache lifecycle once for providers that keep
 state. `HiddenGems.invalidate()` calls the declared hook on every instance. Detection is remembered in the
 config file and reused only while its fingerprint is current and every record revalidates.
