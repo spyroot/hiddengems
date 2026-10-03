@@ -134,7 +134,6 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-selector` | Unknown lookup keys raise `InvalidSelectorError` | [Router](#45-router-and-resolution) |
 | `GAL-discovery` | Entry-point provider loading with a config allowlist | [Registry](#43-registry-and-loading) |
 | `GAL-sdk-optional` | Missing provider SDK reported as `Unsupported`, not an import error | [Registry](#43-registry-and-loading) |
-| `GAL-detect-issues` | Detection issues reported as data, not pseudo-instances | [Provider contract](#42-provider-contract) |
 | `GAL-targets` | Named targets in config v2, with v1 migration and JSON Schema | [Configuration](#44-configuration-v2) |
 | `GAL-scope` | Explicit preference order; a stale preference never widens | [Router](#45-router-and-resolution) |
 | `GAL-routing` | Pattern routes from gem names to targets | [Configuration](#44-configuration-v2) |
@@ -198,7 +197,7 @@ Nothing is rewritten wholesale.
 +   __main__.py                              GAL-cli-detect
 ~   abstract_provider.py                     GAL-plugin
     abstract_provier.py                      removal is a separate decision in GAL-plugin
-~   abstraction.py                           GAL-settings, GAL-sdk-optional, GAL-detect-issues,
+~   abstraction.py                           GAL-settings, GAL-sdk-optional,
                                              GAL-scope, GAL-chooser, GAL-explain, GAL-verify
 +   chooser.py                               GAL-chooser (prompt moved out of resolve_gem)
 +   cli.py                                   GAL-cli-detect, then one subcommand per GAL-cli-* feature
@@ -220,8 +219,8 @@ Nothing is rewritten wholesale.
     gems/
       __init__.py
 +     dotenv_constants.py                    GAL-settings
-~     dotenv_provider.py                     GAL-plugin, GAL-settings, GAL-selector, GAL-detect-issues, GAL-local-off
-~     k8s_provider.py                        GAL-plugin, GAL-settings, GAL-selector, GAL-sdk-optional, GAL-detect-issues,
+~     dotenv_provider.py                     GAL-plugin, GAL-settings, GAL-selector, GAL-local-off
+~     k8s_provider.py                        GAL-plugin, GAL-settings, GAL-selector, GAL-sdk-optional,
                                              GAL-local-off, GAL-kube-contexts, GAL-parallel
       keychain_bridge.cpp                changed only by a proposed Keychain feature
       keychain_bridge.h                  changed only by a proposed Keychain feature
@@ -296,7 +295,11 @@ Gaps that block the goals, with evidence:
    `local` alias is always added, so local kubeconfig discovery cannot be turned off. The fallback namespace
    `default` is a literal.
 6. **Detection issues are pseudo-instances.** Bounded-scan failures become records such as
-   `dotenv:unverified:<root>` and `kubernetes:unverified:<path>`.
+   `dotenv:unverified:<root>` and `kubernetes:unverified:<path>`. This design keeps them.
+   A separate issue list gives the same lookup outcome, `IncompleteGemLookupError`, and changing what
+   `detect()` returns would break every provider, including one registered by replacing
+   `GemProvider.provider_types`. The first feature that must tell a pseudo-instance from a real one, such as
+   `GAL-cli-targets` or `GAL-explain`, adds an optional `DetectedProvider.issue` field in its own scope.
 7. **Writes cannot target an instance.** `hide_gem` raises `AmbiguousGemError` with an empty result when a
    provider has more than one instance, and it has no parameter to pick one. Only dotenv implements `put_gem`.
 8. **Sequential fan-out.** `inspect_gem` calls `find_gem` instance by instance. With N clusters, each checking
@@ -661,9 +664,6 @@ Each change below alters a contract or behavior and requires explicit approval b
   checked, so a duplicate outside the route is not reported. This is the same relaxation an explicit
   `provider=` already makes, but it now comes from configuration. It is opt-in, `explain` shows it, and a
   stale route never falls back.
-- **`GAL-detect-issues`: detection issues become `DetectionReport.issues`.** Contract change to the `detect()`
-  return value; the pseudo-instances disappear. Lookup outcome is unchanged: unchecked scope still raises
-  `IncompleteGemLookupError`.
 - **`GAL-parallel`: lookup timeout produces a `LookupIssue`.** Behavior change, strengthening. Today a hung target
   blocks lookup indefinitely, except the 1Password CLI, which has a 20-second limit.
 - **`GAL-discovery`: entry-point allowlist.** Strengthening. Third-party providers do not run unless listed.
@@ -746,7 +746,6 @@ entries inside a phase are in delivery order:
    3. `GAL-selector`.
    4. `GAL-discovery`.
    5. `GAL-sdk-optional`, including the `UNSUPPORTED` and `ABSENT` states.
-   6. `GAL-detect-issues`.
 3. **Configuration.** Declared targets, so each cluster is one entry.
    1. `GAL-targets`. Rides along: the v1 migration and the JSON Schema.
    2. `GAL-local-off`.
@@ -1013,19 +1012,6 @@ Scope lists where each one went.
   check moved; and `test_wheel_contains_provider_package_and_declared_dependencies`, for the extra marker if
   `GAL-kube-extra` is approved.
 - **Blocked by:** `GAL-plugin-contract`; the packaging part also by `GAL-kube-extra`.
-
-### GAL-detect-issues
-
-- **Files:** `~ abstraction.py`, `~ dotenv_provider.py`, `~ k8s_provider.py`, `~ hidden_gems.py`.
-- **Change:**
-  - `DetectedProvider` gains `issue: str | None = None`.
-  - `DotEnvProvider._scan_issue_record` and `KubernetesProvider._warning_records` set `issue`, and the two
-    constructors read it instead of `settings["scan_issue"]`.
-  - `HiddenGems.inspect_gem` turns a record with an `issue` into a `LookupIssue` without calling `find_gem`.
-  - The `unverified` instance ids stay, so identities do not change.
-- **Existing tests changed:** `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked` and
-  `test_bounded_dotenv_scan_reports_unchecked_provider`.
-- **Blocked by:** `GAL-plugin-contract`.
 
 ### GAL-targets
 
