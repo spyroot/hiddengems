@@ -755,8 +755,10 @@ Resolution:
 
 Picking a candidate: every unresolved result carries `candidates`, a dict from a stable location key to
 non-secret metadata (provider, target, location, and the created and modified dates when the provider has
-them). The key comes from the canonical instance identity and the location, never from order. Dates are shown
-to the human and never used to decide. Unless `interactive=True` is passed, the call never blocks or prompts.
+them). The key comes from the canonical instance identity and the location, never from order. A match whose
+location cannot be encoded gets no key: it is listed in `LookupResult.unkeyed`, and the caller selects it by
+narrowing with `provider`, `target`, or `criteria`. Dates are shown to the human and never used to decide.
+Unless `interactive=True` is passed, the call never blocks or prompts.
 How the candidates reach the caller, as an exception or a return value and as references or values, is open
 question `GAL-return-both`. The example uses today's exceptions, with the result attached; the caller picks a
 key and passes it back:
@@ -832,10 +834,9 @@ in it is `Final[str]`:
 - `TIMEOUT_REASON: Final[str] = "Lookup time limit reached"` and
   `TIMEOUT_NEXT_ACTION: Final[str] = "Check that the target is reachable, then retry"` (`GAL-parallel`).
 - `LOOKUP_SHUTDOWN_GRACE_SECONDS`, `LOOKUP_THREAD_PREFIX`, `NO_DEADLINE_REASON`, `NO_DEADLINE_NEXT_ACTION`,
-  `CHILD_TRANSPORT_REASON`, `CHILD_TRANSPORT_NEXT_ACTION`, and `CHILD_START_METHOD`, listed in
+  `CHILD_TRANSPORT_REASON`, `CHILD_TRANSPORT_NEXT_ACTION`, `CHILD_LINGERING_REASON`, `CHILD_LINGERING_NEXT_ACTION`,
+  `CHILD_ERROR_MESSAGE`, `CHILD_EXIT_MESSAGE`, and `CHILD_START_METHOD`, listed in
   [GAL-parallel.md](gal/GAL-parallel.md#constants) (`GAL-parallel`).
-- `CANDIDATE_INDEX_PREFIX: Final[str] = "@"`: marks the index form of a candidate key, used when a location
-  cannot be encoded (`GAL-chooser`).
 - `CANDIDATE_KEY_SEPARATOR: Final[str] = "#"`: joins instance id and location in a candidate key
   (`GAL-chooser`).
 
@@ -1046,7 +1047,8 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
   the same gem can prompt for authentication again. Where the per-period key lives, and what one
   authentication unlocks, must be settled before this can be approved. A second relaxation, opt-in like the
   first: within a cache period, the caller's earlier choice outlives a duplicate that appears later in another
-  provider. `dig_gem` gains `refresh: bool = False`, and `refresh=True` resolves again at once. `HiddenGems`
+  provider. `dig_gem` gains `refresh: bool = False`, and `refresh=True` resolves again at once; the reloaded
+  result replaces the cached record only when it is published. `HiddenGems`
   gains `cache: AbstractSecretCache = PASS_THROUGH_CACHE`, and a successful `hide_gem` and
   `HiddenGems.invalidate()` empty the cache.
 - **`GAL-sdk-optional`: `kubernetes` SDK moves to an extra** (`hiddengems[kubernetes]`). Packaging contract change.
@@ -1313,7 +1315,7 @@ Status: locked.
 
 ### GAL-plugin
 
-Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 9. `put_gem` moves to `WritableGemProvider`, the
+Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 10. `put_gem` moves to `WritableGemProvider`, the
 read-only providers lose their stubs, and `hide_gem` raises `ProviderNotWritableError` before any call to a
 read-only provider. Under option one, `put_gem` stays, and the feature delivers only the constants package, the
 capability types, and the `tests/contract/` kit. The hooks and shared types of revision 1 moved to the features
@@ -1524,7 +1526,7 @@ is reported ABSENT, and walk outcomes become enums.
 
 - **Files:** `~ abstraction.py`, `~ hidden_gems.py`, `~ config.py`, `+ src/hiddengems/chooser.py`,
   `+ src/hiddengems/atomic_file.py`, `~ constants/config.py` (`CONFIG_FILE_MODE`, `CANONICAL_JSON_SEPARATORS`),
-  `~ constants/lookup.py` (`CANDIDATE_KEY_SEPARATOR`, `CANDIDATE_INDEX_PREFIX`), `+ src/hiddengems/canonical_json.py`,
+  `~ constants/lookup.py` (`CANDIDATE_KEY_SEPARATOR`), `+ src/hiddengems/canonical_json.py`,
   `~ gems/dotenv_provider.py`, and `~ gems/dotenv_constants.py` (`DOTENV_FILE_MODE`).
 - **Move to `atomic_file.py`:** `_exclusive_write_lock` (`dotenv_provider.py:45-78`) and `_rewrite_file`
   (`dotenv_provider.py:80-103`) become `exclusive_write_lock(filename: Path) -> Iterator[None]` and
@@ -1546,11 +1548,19 @@ is reported ABSENT, and walk outcomes become enums.
       separators=CANONICAL_JSON_SEPARATORS)`. There is no `default=`, so two values of different types, such as
       `Path("/x")` and `"/x"`, or a `tuple` and a `list`, never share an encoding, and an unsupported value
       raises `TypeError` instead of falling back to `str()`.
-  - `candidate_key(reference: GemReference, index: int) -> str` in `abstraction.py`: `reference.instance_id`,
-    then `CANDIDATE_KEY_SEPARATOR`, then `canonical_json(reference.location)`. When that raises `TypeError`, the
-    key ends with `CANDIDATE_INDEX_PREFIX` and `index`, the reference's position in `LookupResult.matches`,
-    which is deterministic because matches keep record order. `LookupResult.candidates` passes each index.
-  - The property `LookupResult.candidates -> dict[str, GemReference]`.
+  - `candidate_key(reference: GemReference) -> str` in `abstraction.py`: `reference.instance_id`, then
+    `CANDIDATE_KEY_SEPARATOR`, then `canonical_json(reference.location)`. It depends only on the reference, never
+    on its position, so the same location gives the same key in every result and in any order of matches. A
+    location that `canonical_json` cannot encode raises `TypeError` with `UNSUPPORTED_TYPED_VALUE_MESSAGE`, which
+    names the type and never the value.
+  - The property `LookupResult.candidates -> dict[str, GemReference]`: each match whose `candidate_key` succeeds,
+    by its key. Two matches with the same key are the same instance and location, so they read the same gem; the
+    dict keeps the first in record order.
+  - The property `LookupResult.unkeyed -> tuple[GemReference, ...]`: the matches whose `candidate_key` raised
+    `TypeError`, in record order. `choice` cannot name them; the caller selects one by narrowing with `provider`,
+    `target`, or `criteria`, so a tie that holds one is still reported and never decided for the caller.
+  - Alternative not taken: result-local index tokens. They depend on the order of matches, so they would need a
+    result identity and replay rules; location keys need neither.
   - `resolve_gem` and `dig_gem` gain `choice: str | None = None`, a key of `candidates` that reads exactly that
     location, and `remember: bool = False`, which saves the choice through `save_preference` and then sets
     `HiddenGems.preferences[name]` to it, so later calls in the same object use it.
@@ -1568,9 +1578,11 @@ is reported ABSENT, and walk outcomes become enums.
     `to_typed` and `from_typed` with their types, and no two of them share a `canonical_json` encoding;
   - `test_unsupported_value_raises_a_typed_error`: an object of an unsupported type raises `TypeError` with
     `UNSUPPORTED_TYPED_VALUE_MESSAGE`, which does not contain the value's `repr`;
-  - `test_candidate_keys_distinguish_types_and_fall_back_by_index`: locations `Path("/x")` and `"/x"` give
-    different keys; a location holding an unsupported object gets the index key; the same result gives the same
-    keys twice.
+  - `test_candidate_keys_distinguish_types`: locations `Path("/x")` and `"/x"` give different keys;
+  - `test_candidate_key_stability_for_unsupported_locations_and_reordered_matches`: one result holds two supported
+    locations and one location with an object of an unsupported type. The same matches in reversed order give the
+    same `candidates`, key for key and reference for reference. The unsupported one is absent from `candidates`
+    and present in `unkeyed`, and `choice` with any key never selects it.
 - **Blocked by:** `GAL-scope`; the Tie path by `GAL-return-both`.
 
 ### GAL-explain
@@ -1601,14 +1613,15 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 6. It replaces the earlier entry here, which
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 7. It replaces the earlier entry here, which
 bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
 `cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline` (the
 Keychain under Keychain option (a)), a timeout becomes a `LookupIssue`, matches merge in record order, and
 shutdown waits for every running call. Kubernetes reads are bounded by reading the body in single-socket-read
 chunks under the deadline. The read of a declared dotenv file on an unresponsive mount is the owner's decision
 there: under the recommended option, such a file is read through the shared child runner `run_in_child`, so
-the lookup stays bounded; under the other, the lookup waits for that read.
+the lookup returns within its bound, and a killed child that the operating system still holds is reported with
+`CHILD_LINGERING_REASON` and waited for at interpreter exit; under the other, the lookup waits for that read.
 
 - **Blocked by:** `GAL-plugin`, `GAL-settings`, `GAL-scope`, `GAL-chooser`, `GAL-discovery` under non-cooperative
   option (b), and the `GAL-parallel` choices.
@@ -1691,8 +1704,11 @@ fingerprint is current and every record revalidates.
 
 Specified in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 5. An opt-in `HiddenGems(cache=...)` holds
 resolved values encrypted for a fixed period, so repeated `dig_gem` calls for an unchanged request make no
-`find_gem` or `get_gem` call. `dig_gem(refresh=True)`, `hide_gem`, and `HiddenGems.invalidate()` end a cached
-choice. The cache is a separate contract; `AbstractGemProvider`, the factory, and the providers are unchanged.
+`find_gem` or `get_gem` call. A `dig_gem(refresh=True)` whose reloaded result is published, a successful
+`hide_gem`, and `HiddenGems.invalidate()` end a cached choice. A refresh whose reload fails, or whose result is
+not published, keeps the record until the period ends, `invalidate()`, or a later published refresh; a failed
+reload's error reaches the caller. The cache is a separate contract; `AbstractGemProvider`, the factory, and the
+providers are unchanged.
 
 - **Blocked by:** `GAL-plugin`, `GAL-settings`, `GAL-parallel`, `GAL-chooser`, `GAL-remember`, `GAL-masked-value`,
   and decision `GAL-secure-cache`.
