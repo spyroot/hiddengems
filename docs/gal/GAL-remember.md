@@ -1,9 +1,18 @@
 # GAL-remember: remembered detection and provider invalidation
 
-Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 6. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
 [Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate).
+
+Revision 6 answers review findings GR2 and GR3 on revision 5. For GR2, remembered settings use the
+type-preserving encoding of `GAL-chooser`, `to_typed` and `from_typed` in `canonical_json.py`: every setting
+value is stored as a typed node, so an ordinary `dict` shaped like a tag round-trips as a `dict` and never as a
+`Path`. `PATH_TAG`, `TUPLE_TAG`, and `DATETIME_TAG` are removed, and case R15 covers such settings. For GR3,
+`CachingGemProvider._cached` is single-flight per key: a concurrent miss for the same key waits for the first
+load and returns the stored value. A stored value belongs to the store and is released at `invalidate`; a value
+returned without being stored belongs to its caller, and `_release` is never called for it. Cases C10 and C11
+cover them.
 
 Revision 5 applies the second round of shared decisions. Cases R1 to R4 use the test class
 `InvalidatingProvider`, and `FakeProvider` is unchanged. `GemProvider.revalidate` and
@@ -114,7 +123,7 @@ Out of scope:
 ~ src/hiddengems/gems/onepassword_provider.py    environment_names; revalidate
 ~ src/hiddengems/gems/onepassword_constants.py   SDK_INSTALLED_SETTING, ONEPASSWORD_SDK_MODULE
 ~ tests/contract/example_providers.py            CachingEnvironmentProvider
-~ tests/contract/test_provider_contract.py       contract cases C1 to C9
+~ tests/contract/test_provider_contract.py       contract cases C1 to C11
 ~ tests/test_hidden_gems_routing.py              InvalidatingProvider; cases R1 to R17, F1, F2, K1, K2, O1
 ~ tests/test_hidden_gems_dotenv.py               case D1
 ~ tests/test_hidden_gems_keyring.py              case Y1
@@ -158,15 +167,22 @@ names are listed under [Acceptance cases](#acceptance-cases).
     `CachingGemProvider` supplies, not only one defined in the subclass's own body.
 - **Behavior:**
   - The store belongs to the instance: a `_CacheStore` with the fields `lock: threading.Lock`,
-    `entries: dict[Hashable, object]`, and `generation: int`. It is created on first use with
-    `self.__dict__.setdefault(CACHE_STORE_ATTRIBUTE, _CacheStore())` and never kept on the class.
-  - `_cached` returns the entry for `key` when present. Otherwise it records the generation, calls `load()`
-    outside the lock, and stores the result only if the generation has not changed meanwhile. It returns the
-    loaded value either way. An exception from `load()` propagates, and nothing is stored.
-  - `invalidate`, under the lock, takes every entry, empties the store, and adds one to `generation`. Outside
-    the lock it calls `_release(key, value)` for each taken entry in insertion order. It collects every
-    exception and, after the last entry, raises
+    `key_locks: dict[Hashable, threading.Lock]`, `entries: dict[Hashable, object]`, and `generation: int`. It
+    is created on first use with `self.__dict__.setdefault(CACHE_STORE_ATTRIBUTE, _CacheStore())` and never
+    kept on the class. `key_locks` holds one lock per key, created under `lock` on the first miss for that key.
+  - `_cached` is single-flight per key. It returns the entry for `key` when present. On a miss it takes the
+    key's lock and holds it across `load()` and storing the result, so a concurrent miss for the same key
+    waits and then returns the stored value. Holding the key's lock, it checks the entry again under `lock` and
+    returns it when present; otherwise it records the generation, calls `load()` outside `lock`, and stores the
+    result only if the generation has not changed meanwhile. It returns the loaded value either way: a value
+    whose load finished after its generation ended is returned to its caller and not stored. An exception from
+    `load()` propagates, and nothing is stored.
+  - `invalidate`, under `lock`, takes every entry, empties the store, and adds one to `generation`. It takes no
+    key's lock, so it waits for no load in progress. Outside `lock` it calls `_release(key, value)` for each
+    taken entry in insertion order. It collects every exception and, after the last entry, raises
     `ExceptionGroup(CACHE_RELEASE_FAILED_MESSAGE.format(count=len(errors)), errors)`.
+  - Ownership: a stored value belongs to the store, and `_release` releases it at `invalidate`; a value
+    returned without being stored belongs to its caller, and `_release` is never called for it.
   - A subclass supplies only `_release`, and only when a cached value holds a resource that must be closed.
 - **Implementation owner:** `CachingGemProvider` in `abstract_provider.py`. At delivery no `p ∈ P` subclasses
   it. Its consumer at delivery is `CachingEnvironmentProvider` in `tests/contract/example_providers.py`. It
@@ -176,7 +192,7 @@ names are listed under [Acceptance cases](#acceptance-cases).
   provider keeps state.
 - **Actual caller:** `HiddenGems.invalidate` through `AbstractGemProvider.invalidate`; the subclass's own
   lookups call `_cached`.
-- **Acceptance tests:** C3, C4, C5, C6.
+- **Acceptance tests:** C3, C4, C5, C6, C10, C11.
 
 #### `AbstractGemProvider.revalidate`
 
@@ -347,10 +363,14 @@ names are listed under [Acceptance cases](#acceptance-cases).
     holds `atomic_file.exclusive_write_lock(path)`, reads the file again, sets only `REMEMBERED_KEY`, and
     replaces the file through `atomic_file.rewrite_file(path, contents, mode=CONFIG_FILE_MODE)`. Every other
     key is kept. A missing file is created with `CONFIG_FILE_MODE`.
-  - **Encoding:** `str`, `int`, `float`, `bool`, `None`, `list`, and `dict` with `str` keys are stored as JSON.
-    `Path` becomes `{PATH_TAG: "<str>"}`, `tuple` becomes `{TUPLE_TAG: [...]}`, and `datetime` becomes
-    `{DATETIME_TAG: "<ISO 8601>"}`, with the tags from `constants/remember.py`. Decoding restores the same
-    types, so a record compares equal after a round trip. Any other type cannot be encoded.
+  - **Encoding:** each record is stored whole as a typed node, through the type-preserving encoding of
+    `GAL-chooser`, `to_typed` and `from_typed` in `canonical_json.py`: its `provider`, `instance_id`, and `state`,
+    each evidence entry's `source`, `description`, `path`, and `observed_at` (a `Path`, a timezone-aware
+    `datetime`, or `None`), and every setting value. An ordinary `dict` shaped like a tag,
+    such as `{"t": "path", "v": "/x"}` or `{"$path": "/x"}` of revision 5, round-trips as a `dict` and never
+    as a `Path`. Decoding restores the same types, so a record compares equal after a round trip. A setting of
+    an unsupported type makes `to_typed` raise `TypeError`, and `save_remembered` then writes nothing and
+    warns, as above.
   - `forget_remembered` removes `REMEMBERED_KEY` under the same lock. A missing file or key is not an error.
 - **Implementation owner:** `detection_cache.py`.
 - **Actual caller:** `HiddenGems.__init__` and `HiddenGems.invalidate`.
@@ -360,9 +380,10 @@ names are listed under [Acceptance cases](#acceptance-cases).
 `atomic_file.rewrite_file(path, contents, mode=CONFIG_FILE_MODE)` from `GAL-chooser` (plan 4.3), which
 creates `atomic_file.py`. This feature neither creates nor moves them.
 
-`current_fingerprint` uses `canonical_json` from `GAL-chooser` (plan 4.3), which creates `canonical_json.py`
-and adds `CANONICAL_JSON_SEPARATORS` to `constants/config.py`. This feature imports `canonical_json` and
-`CANONICAL_JSON_SEPARATORS` and creates neither.
+`current_fingerprint` uses `canonical_json`, and `save_remembered` and `load_remembered` use `to_typed` and
+`from_typed`, from `GAL-chooser` (plan 4.3), which creates `canonical_json.py` and adds
+`CANONICAL_JSON_SEPARATORS` to `constants/config.py`. This feature imports `canonical_json`, `to_typed`,
+`from_typed`, and `CANONICAL_JSON_SEPARATORS`, and creates none of them.
 
 #### `GemConfig.remembered`
 
@@ -458,7 +479,7 @@ The baseline stays commit `4438234`. This proposal changes no member of `B` and 
 
 ## Exceptions
 
-One new class, and four reuses, under the overview's exception rules. This feature's pull request adds
+One new class, and three reuses, under the overview's exception rules. This feature's pull request adds
 `("hiddengems.detection_cache", "RememberedStoreWarning", ("UserWarning",))` to `EXPECTED_EXCEPTIONS` in
 `test_exception_classes_match_the_register` of `GAL-plugin`:
 
@@ -478,7 +499,8 @@ One new class, and four reuses, under the overview's exception rules. This featu
   after every step has run. It carries each original exception unchanged, which no single class can.
 - **Reused: `TypeError`,** raised by `CachingGemProvider.__init_subclass__` when a subclass overrides
   `invalidate`. A wrong class definition is a type error. `HiddenGems.invalidate` also collects a `TypeError`
-  with `NOT_A_PROVIDER_MESSAGE` for an instance that does not subclass `AbstractGemProvider`.
+  with `NOT_A_PROVIDER_MESSAGE` for an instance that does not subclass `AbstractGemProvider`. `to_typed` raises
+  it for a setting of an unsupported type; it is caught in `save_remembered` and turned into the warning above.
 - **Reused: `OSError`,** from the file system, caught in `HiddenGems.__init__` and turned into the warning above.
 - **Not raised:** `load_remembered` returns a status for every content problem, and `revalidate` returns a
   `Revalidation`; neither raises for a remembered entry that is missing, malformed, or stale.
@@ -494,8 +516,6 @@ One new class, and four reuses, under the overview's exception rules. This featu
 - `REMEMBERED_FORMAT: Final[int] = 1`;
 - `REMEMBERED_EVIDENCE_DESCRIPTION: Final[str] = "Remembered from an earlier detection"`;
 - `REMEMBERED_STORE_WARNING: Final[str] = "Remembered detection not saved to {path}: {cause}"`;
-- `PATH_TAG: Final[str] = "$path"`, `TUPLE_TAG: Final[str] = "$tuple"`, and
-  `DATETIME_TAG: Final[str] = "$datetime"`, the encoding tags of the remembered store;
 - `CACHE_STORE_ATTRIBUTE: Final[str] = "_hiddengems_cache_store"`;
 - `INVALIDATE_OVERRIDE_MESSAGE: Final[str] = "{cls} must not override invalidate; override _release instead"`;
 - `CACHE_RELEASE_FAILED_MESSAGE: Final[str] = "Releasing {count} cached value(s) failed"`;
@@ -615,6 +635,10 @@ remembers.
 - **C9** `test_default_revalidate_rules`: an existing path gives `VALID`, a removed path `INVALID`, an
   `OS_FACILITY` entry without a path `UNKNOWN`, a `CONFIG` entry without a path `VALID`, no evidence
   `UNKNOWN`, and a record whose only entry is `REMEMBERED` `UNKNOWN`.
+- **C10** `test_concurrent_same_key_load_releases_or_reuses_one_value`: two loaders behind a barrier; `load` runs
+  once, both callers get the same object, and `invalidate()` releases it once.
+- **C11** `test_load_after_invalidate_is_caller_owned`: a load that finishes after `invalidate()` is returned,
+  not stored, and never passed to `_release`.
 
 `tests/test_hidden_gems_routing.py`:
 
@@ -646,7 +670,8 @@ remembers.
 - **R15** `test_remembered_records_round_trip_equal`: records from all four built-in `detect()` methods, on
   recorded inputs, are saved and loaded; each loaded record equals its original with
   `DetectionEvidence(EvidenceSource.REMEMBERED, REMEMBERED_EVIDENCE_DESCRIPTION, None, observed_at)` appended to
-  its evidence.
+  its evidence. It also saves settings holding `dict` values shaped like typed nodes, such as
+  `{"t": "path", "v": "/x"}`, nested once, and asserts their types after the round trip.
 - **R16** `test_invalidate_reports_an_instance_outside_the_contract`: a `FakeProvider` instance adds one
   `TypeError` with `NOT_A_PROVIDER_MESSAGE` to the raised `ExceptionGroup`.
 - **R17** `test_uninstalled_package_never_remembers`: with `importlib.metadata.version` raising
