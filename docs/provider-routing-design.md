@@ -271,10 +271,74 @@ Status values:
 | `GAL-sdk-optional` | `supported_os()`, `required_modules()` | `classify()` | Locked |
 | `GAL-discovery` | none | `load_provider_types()`; `types=` | Locked |
 | `GAL-verify` | subclass `VerifiableGemProvider` | none | Locked |
+| `GAL-secure-cache` | none; a separate cache contract | none | Declared |
 | `GAL-return-gate` | none | checks every return of `detect` | Locked |
 
 The functions and types that are not members of `AbstractGemProvider`, such as `write_capability` of
 `GAL-plugin`, are declared with the same five parts in their feature's proposal.
+
+### Exception consistency
+
+The gate applies to exceptions and warnings in the same way. `E_B` is the set of exception classes the package
+defines at `4438234`, found by parsing every module:
+
+| Class | Base | Defined at | Meaning in the baseline |
+| --- | --- | --- | --- |
+| `ProviderNotAvailableError` | `LookupError` | `abstraction.py:12` | the caller selected an unavailable provider |
+| `ProviderLookupError` | `Exception` | `abstraction.py:74` | an instance could not be checked; no absence |
+| `ProviderNotApplicable` | `Exception` | `abstraction.py:89` | the instance is outside the partial preference |
+| `GemNotFoundError` | `LookupError` | `hidden_gems.py:29` | no checked provider contains the name |
+| `ProviderRequiredError` | `ValueError` | `hidden_gems.py:33` | a write needs an explicit provider |
+| `AmbiguousGemError` | `LookupError` | `hidden_gems.py:37` | more than one location matches |
+| `IncompleteGemLookupError` | `LookupError` | `hidden_gems.py:45` | a detected provider could not be checked |
+| `StaleGemPreferenceError` | `LookupError` | `hidden_gems.py:56` | the chosen provider lacks the name |
+| `_NativeKeychainError` | `RuntimeError` | `gems/keyring_provider.py:45` | private; becomes `ProviderLookupError` |
+
+The baseline also raises built-in exceptions directly: `ValueError`, `TypeError`, `NotImplementedError` from the
+three `put_gem` stubs, and `KeyError`, which escapes `KubernetesProvider.get_gem` for a removed key.
+
+Rules for every feature:
+
+1. **Reuse first.** A situation that a class in `E_B`, or a built-in exception, already names reuses it.
+2. **A new class needs a caller that must tell it apart.** The proposal names the closest existing class and
+   says why it does not fit.
+3. **A new class subclasses what today's handlers catch** for the same situation, so existing `except` clauses
+   keep working. A warning subclasses `UserWarning` or `DeprecationWarning`.
+4. **No secret in an exception.** Messages and attributes never hold a gem value, a token, a password, or key
+   material. Gem names, provider names, instance ids, and paths are allowed, as in `E_B` today.
+5. **Declared like any extension:** signature, behavior, implementation owner, actual caller, and acceptance
+   tests, plus the closest existing class, why it does not fit, and the handlers that still catch it.
+
+**Check:** `test_exception_classes_match_the_register`, in `tests/contract/test_provider_contract.py`. It is
+delivered by `GAL-plugin`, the first feature that adds a class. It imports every module under `hiddengems` with
+`pkgutil.walk_packages` and collects each class derived from `BaseException` that the package defines, warnings
+included. It compares their module, name, and direct bases with an expected set: `E_B` plus the approved
+additions. An undeclared class, a changed base, or a missing baseline class fails. A feature that adds a class
+adds its entry to that set in its own pull request, where the owner sees it. Each new class also has a case that
+an existing handler catches it.
+
+New classes proposed so far:
+
+- **`ProviderNotWritableError(NotImplementedError)`, `GAL-plugin`, declared.** Closest: `ProviderNotAvailableError`,
+  which means no provider matched. Here one matched and cannot store. Today's stubs raise `NotImplementedError`,
+  so its handlers keep working.
+- **`RememberedStoreWarning(UserWarning)`, `GAL-remember`, declared.** A failed save of remembered detection must
+  not fail construction, so it is a warning. Its own category lets a caller filter it without matching text.
+- **`CacheIntegrityError(ValueError)`, `GAL-secure-cache`, declared.** Closest: `cryptography`'s `InvalidTag`,
+  which belongs to one library, while a replacement cipher raises its own. Plain `ValueError` would also hide
+  programming errors around decoding. It never leaves the cache.
+- **`SecretCacheWarning(UserWarning)`, `GAL-secure-cache`, declared.** Closest: `RememberedStoreWarning`, which
+  reports the detection store. Value caching stays separate from it.
+- **`InvalidSelectorError(ValueError)`, `GAL-selector`, locked.** Closest: `ProviderNotApplicable`, which means an
+  instance is outside a valid preference. A key that no provider declares is an error in the caller's input.
+- **`UnknownSettingError`, `GAL-settings`; `ProviderLoadError(RuntimeError)`, `GAL-discovery`;
+  `ConfigError(ValueError)`, `GAL-targets`; `ProviderContractError(RuntimeError)`, `GAL-return-gate`:** locked,
+  each until its proposal gives the justification above.
+
+Decided reuse, with no new class: a lookup timeout is `ProviderLookupError` with `TIMEOUT_REASON` (`GAL-parallel`);
+a plain directory path or a home-rooted tree is `ValueError` (`GAL-expand`); several failed invalidation steps
+are one built-in `ExceptionGroup` (`GAL-remember`); `write_capability` with a non-provider input is `TypeError`
+(`GAL-plugin`); a uniform read error would be `ProviderLookupError` (proposed `GAL-read-errors`).
 
 ## Feature index
 
@@ -310,6 +374,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-verify` | Explicit active verification of one target | [Provider contract](#42-provider-contract) |
 | `GAL-cli-verify` | `verify` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-masked-value` | `SecretValue` wrapper with masked `repr` and `str` | [Additional pieces](#7-additional-pieces) |
+| `GAL-secure-cache` | Encrypted value cache; one prompt per period | [GAL-secure-cache.md](gal/GAL-secure-cache.md) |
 | `GAL-secret-service` | Linux Secret Service provider | [Additional pieces](#7-additional-pieces) |
 | `GAL-wincred` | Windows Credential Manager provider | [Additional pieces](#7-additional-pieces) |
 | `GAL-vault` | HashiCorp Vault KV v2 provider | [Additional pieces](#7-additional-pieces) |
@@ -421,8 +486,8 @@ Nothing is rewritten wholesale.
   choice among duplicates, explicit provider for writes, and no secret values in metadata, errors, or logs.
 
 Non-goals: caching gem values, remote configuration, and a daemon or server mode. An encrypted cache that
-avoids repeated prompts would relax the first non-goal; it is open question `GAL-secure-cache` (see
-[Contract impact](#5-contract-impact)).
+avoids repeated prompts relaxes the first non-goal only for a caller that passes one. It is proposed in
+[GAL-secure-cache.md](gal/GAL-secure-cache.md) (see [Contract impact](#5-contract-impact)).
 
 ## 2. Current state
 
@@ -743,8 +808,8 @@ as `software-design.md` requires. An earlier version of this section put every c
 - `CACHE_DIR_NAME: Final[str] = ".hiddengem"`, `CACHE_DIR_MODE: Final[int] = 0o700`, and
   `CACHE_FILE_MODE: Final[int] = 0o600`: the directory and file modes `~/.ssh` uses.
 - `CACHE_PERIOD_SECONDS: Final[int] = 86_400`: the 24-hour default period.
-- `CACHE_KEY_BYTES: Final[int] = 32`: an AES-256 key. `CACHE_NONCE_BYTES: Final[int] = 12`: the standard
-  AES-GCM nonce.
+- `CACHE_KEY_BYTES: Final[int] = 32`: an AES-256 key. The nonce length belongs to each cipher adapter;
+  [GAL-secure-cache.md](gal/GAL-secure-cache.md#constants) lists the full module.
 
 `src/hiddengems/secret_value.py`:
 
@@ -858,7 +923,8 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
   longer prompts through `input()` in core code.
 - **`GAL-write-target`: `hide_gem(target=...)`.** Contract extension. Existing calls keep working, and the
   multi-instance error gains candidate names.
-- **`GAL-secure-cache` (open; no feature yet): looked-up values held encrypted between calls.** Relaxation of the non-goal
+- **`GAL-secure-cache`, specified in [GAL-secure-cache.md](gal/GAL-secure-cache.md): looked-up values held
+  encrypted between calls.** Relaxation of the non-goal
   "no caching of gem values": a value would outlive the call that read it. Why: without it, every request to
   the same gem can prompt for authentication again. Where the per-period key lives, and what one
   authentication unlocks, must be settled before this can be approved.
@@ -992,7 +1058,9 @@ blocks. A default is a recommendation, not a decision; each entry stays open unt
 - **`GAL-class-preference`:** may one answer resolve every gem with the same found set `R(g)`, and how is that
   shown in `explain`?
   Default: not offered before `GAL-chooser` ships. Blocks: nothing yet.
-- **`GAL-secure-cache`:** may the library hold a looked-up value encrypted between calls, so a follow-up for the
+- **`GAL-secure-cache`:** proposed in [GAL-secure-cache.md](gal/GAL-secure-cache.md), which decides the points
+  below as alternatives with recommendations. The original question: may the library hold a looked-up value
+  encrypted between calls, so a follow-up for the
   same gem does not prompt again (for example a Keychain password, or a 1Password unlock)? A cache that outlives
   the process needs symmetric authenticated encryption (AEAD, such as AES-256-GCM); the standard library has
   none, so it adds a dependency. Key lifecycle under consideration:
