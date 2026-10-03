@@ -449,7 +449,7 @@ Nothing is rewritten wholesale.
                                              GAL-chooser, GAL-explain, GAL-parallel, GAL-verify, GAL-remember
 +   atomic_file.py                           GAL-chooser (locked file rewrite moved out of dotenv_provider), used by
                                              GAL-remember and GAL-secure-cache
-+   canonical_json.py                        GAL-chooser, used by GAL-remember and GAL-secure-cache
++   canonical_json.py                        GAL-chooser (typed encoding), used by GAL-remember, GAL-secure-cache
 +   chooser.py                               GAL-chooser (prompt moved out of resolve_gem)
 +   cli.py                                   GAL-cli-detect, then one subcommand per GAL-cli-* feature
 +   config.py                                GAL-targets (config reading moved out of HiddenGems.__init__),
@@ -830,6 +830,8 @@ in it is `Final[str]`:
   `TIMEOUT_NEXT_ACTION: Final[str] = "Check that the target is reachable, then retry"` (`GAL-parallel`).
 - `LOOKUP_SHUTDOWN_GRACE_SECONDS`, `LOOKUP_THREAD_PREFIX`, `NO_DEADLINE_REASON`, `NO_DEADLINE_NEXT_ACTION`, and
   `CHILD_START_METHOD`, listed in [GAL-parallel.md](gal/GAL-parallel.md#constants) (`GAL-parallel`).
+- `CANDIDATE_INDEX_PREFIX: Final[str] = "@"`: marks the index form of a candidate key, used when a location
+  cannot be encoded (`GAL-chooser`).
 - `CANDIDATE_KEY_SEPARATOR: Final[str] = "#"`: joins instance id and location in a candidate key
   (`GAL-chooser`).
 
@@ -854,6 +856,12 @@ in it is `Final[str]`:
   `GemProvider.create` raises today, used by `create` and `GemProvider.expand` (`GAL-expand`).
 - `CANONICAL_JSON_SEPARATORS: Final[tuple[str, str]] = (",", ":")`: the separators of
   `canonical_json.canonical_json` (`GAL-chooser`).
+- The typed encoding (`GAL-chooser`): `TYPED_TYPE_KEY: Final[str] = "t"` and `TYPED_VALUE_KEY: Final[str] = "v"`;
+  one `Final[str]` tag per supported type, `TYPED_STR_TAG = "str"`, `TYPED_INT_TAG = "int"`,
+  `TYPED_FLOAT_TAG = "float"`, `TYPED_BOOL_TAG = "bool"`, `TYPED_NULL_TAG = "null"`, `TYPED_BYTES_TAG = "bytes"`,
+  `TYPED_LIST_TAG = "list"`, `TYPED_TUPLE_TAG = "tuple"`, `TYPED_DICT_TAG = "dict"`, `TYPED_PATH_TAG = "path"`,
+  and `TYPED_DATETIME_TAG = "datetime"`; `UNSUPPORTED_TYPED_VALUE_MESSAGE: Final[str] = "Cannot encode a value of
+  type {type_name}"` and `MALFORMED_TYPED_NODE_MESSAGE: Final[str] = "Malformed typed node"`.
 - `DISCOVERY_LOCAL_OPTION: Final[str] = "include_local"`: the detection option the router passes to
   providers (`GAL-local-off`).
 - `DETECTION_LIFETIME_SECONDS` moves to `constants/remember.py`, with the other `GAL-remember` constants listed in
@@ -1507,7 +1515,7 @@ is reported ABSENT, and walk outcomes become enums.
 
 - **Files:** `~ abstraction.py`, `~ hidden_gems.py`, `~ config.py`, `+ src/hiddengems/chooser.py`,
   `+ src/hiddengems/atomic_file.py`, `~ constants/config.py` (`CONFIG_FILE_MODE`, `CANONICAL_JSON_SEPARATORS`),
-  `~ constants/lookup.py` (`CANDIDATE_KEY_SEPARATOR`), `+ src/hiddengems/canonical_json.py`,
+  `~ constants/lookup.py` (`CANDIDATE_KEY_SEPARATOR`, `CANDIDATE_INDEX_PREFIX`), `+ src/hiddengems/canonical_json.py`,
   `~ gems/dotenv_provider.py`, and `~ gems/dotenv_constants.py` (`DOTENV_FILE_MODE`).
 - **Move to `atomic_file.py`:** `_exclusive_write_lock` (`dotenv_provider.py:45-78`) and `_rewrite_file`
   (`dotenv_provider.py:80-103`) become `exclusive_write_lock(filename: Path) -> Iterator[None]` and
@@ -1515,11 +1523,24 @@ is reported ABSENT, and walk outcomes become enums.
   becomes the `mode` argument, `DOTENV_FILE_MODE` for `HiddenDotFileGem`. `GAL-remember` and
   `GAL-secure-cache` import the module.
 - **New names:**
-  - `canonical_json(value: object) -> str` in `canonical_json.py`: returns
-    `json.dumps(value, sort_keys=True, separators=CANONICAL_JSON_SEPARATORS, default=str)`. `GAL-remember` and
-    `GAL-secure-cache` import it.
-  - `candidate_key(reference: GemReference) -> str` in `abstraction.py`: `reference.instance_id`, then
-    `CANDIDATE_KEY_SEPARATOR`, then `canonical_json(reference.location)`.
+  - One type-preserving encoding in `canonical_json.py`. `GAL-remember` and `GAL-secure-cache` import it, and
+    their own revisions move their encodings onto it:
+    - `to_typed(value: object) -> dict[str, Any]`: every value becomes `{TYPED_TYPE_KEY: tag, TYPED_VALUE_KEY:
+      payload}`. Supported, each with its own tag: `str`, `int`, `float`, `bool` (checked before `int`), `None`,
+      `bytes` (base64 payload), `list`, `tuple`, `dict` with `str` keys (payload: `[key, node]` pairs sorted by
+      key), `pathlib.Path` (payload `str(path)`), and a timezone-aware `datetime` (ISO 8601 payload). Any other
+      type, or a `dict` key that is not a `str`, raises `TypeError` with `UNSUPPORTED_TYPED_VALUE_MESSAGE`, which
+      names the type and never the value.
+    - `from_typed(node: object) -> object`: the exact inverse. A node of the wrong shape, or with an unknown tag,
+      raises `ValueError` with `MALFORMED_TYPED_NODE_MESSAGE`.
+    - `canonical_json(value: object) -> str`: `json.dumps(to_typed(value), sort_keys=True,
+      separators=CANONICAL_JSON_SEPARATORS)`. There is no `default=`, so two values of different types, such as
+      `Path("/x")` and `"/x"`, or a `tuple` and a `list`, never share an encoding, and an unsupported value
+      raises `TypeError` instead of falling back to `str()`.
+  - `candidate_key(reference: GemReference, index: int) -> str` in `abstraction.py`: `reference.instance_id`,
+    then `CANDIDATE_KEY_SEPARATOR`, then `canonical_json(reference.location)`. When that raises `TypeError`, the
+    key ends with `CANDIDATE_INDEX_PREFIX` and `index`, the reference's position in `LookupResult.matches`,
+    which is deterministic because matches keep record order. `LookupResult.candidates` passes each index.
   - The property `LookupResult.candidates -> dict[str, GemReference]`.
   - `resolve_gem` and `dig_gem` gain `choice: str | None = None`, a key of `candidates` that reads exactly that
     location, and `remember: bool = False`, which saves the choice through `save_preference` and then sets
@@ -1532,7 +1553,15 @@ is reported ABSENT, and walk outcomes become enums.
 - **Move:** the `print` and `input` loop in `resolve_gem` moves to `terminal_chooser`. `HiddenGems` with
   `interactive=True` keeps working by calling it.
 - **Rule:** an unknown `choice` raises `ValueError` naming the key.
-- **Existing tests changed:** none; new tests in `tests/test_hidden_gems_routing.py`.
+- **Existing tests changed:** none. New tests in `tests/test_hidden_gems_routing.py` include:
+  - `test_typed_encoding_round_trips_and_keeps_types_apart`: `Path("/x")` and `"/x"`, a `tuple` and a `list`,
+    `bytes` and `str`, and a `dict` shaped like a typed node, each nested once, round-trip through
+    `to_typed` and `from_typed` with their types, and no two of them share a `canonical_json` encoding;
+  - `test_unsupported_value_raises_a_typed_error`: an object of an unsupported type raises `TypeError` with
+    `UNSUPPORTED_TYPED_VALUE_MESSAGE`, which does not contain the value's `repr`;
+  - `test_candidate_keys_distinguish_types_and_fall_back_by_index`: locations `Path("/x")` and `"/x"` give
+    different keys; a location holding an unsupported object gets the index key; the same result gives the same
+    keys twice.
 - **Blocked by:** `GAL-scope`; the Tie path by `GAL-return-both`.
 
 ### GAL-explain
