@@ -1,8 +1,21 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 8. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 9. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 9 corrects the acceptance cases and the exit gate of `run_in_child` after review:
+
+- the parent joins the receiver thread only after a confirmed exit, so the held-child case returns within its
+  bound;
+- the partial-frame case uses the fake context and writes the frame header before the wait begins, so it
+  exercises the partial frame;
+- the exit gate is `CHILD_EXIT_GATE_SECONDS`, half the grace, so `run_in_child` returns before the router's
+  wait ends and the router sees `CHILD_LINGERING_REASON`;
+- an expired deadline starts no child, and a `finally` kills the child when an exception, such as
+  `KeyboardInterrupt`, leaves the wait early;
+- `_child_main` makes the pipe non-inheritable, `_receive_outcome` turns any exception into `None` and closes
+  the pipe in a `finally`, and the exit is also confirmed by the process sentinel.
 
 Revision 8 answers review findings GPA6 and GPA7 in `run_in_child`:
 
@@ -128,8 +141,9 @@ Out of scope:
 ```text
 ~ src/hiddengems/abstraction.py                  Deadline; Capability.DEADLINE
 ~ src/hiddengems/abstract_provider.py            DeadlineAwareGemProvider; deadline_capability
-+ src/hiddengems/child_runner.py                 run_in_child, child_find, child_get, _child_main, ChildOutcome,
-                                                 under non-cooperative option (b) or dotenv option (b)
++ src/hiddengems/child_runner.py                 run_in_child, child_find, child_get, _child_main,
+                                                 _receive_outcome, ChildOutcome, under non-cooperative
+                                                 option (b) or dotenv option (b)
 ~ src/hiddengems/constants/capability.py         deadline reason constants; LEGACY_DEADLINE_WARNING
 ~ src/hiddengems/constants/lookup.py             the lookup constants below
 ~ src/hiddengems/hidden_gems.py                  _inspect_within, _resolve_within; one deadline per lookup;
@@ -412,8 +426,8 @@ baseline is commit `4438234`.
     entry point, and `ChildOutcome(StrEnum)` with the members `RESULT`, `NOT_APPLICABLE`, `LOOKUP_ERROR`,
     `TRANSPORT`, and `ERROR`.
   - `_receive_outcome(receiver: Connection, box: list[bytes | None]) -> None`, run in the parent's receiver
-    thread: it appends the bytes of one complete outcome from `receiver.recv_bytes()`, or `None` on `EOFError` or
-    `OSError`, and then closes `receiver`.
+    thread: it appends the bytes of one complete outcome from `receiver.recv_bytes()`, or `None` when that call
+    raises any `Exception`, and closes `receiver` in a `finally`.
 
   The router's wrappers are private methods of `HiddenGems`. `_find_in_child(self, record: DetectedProvider,
   provider_type: type, name: str, criteria: Mapping[str, Any] | None, deadline: Deadline) ->
@@ -422,8 +436,9 @@ baseline is commit `4438234`.
   -> list[Gem]` returns `run_in_child(child_get, (record, provider_type, reference), deadline)`.
 - **Status:** MUST ADD under non-cooperative option (b) or dotenv option (b) only.
 - **Behavior of `run_in_child`,** in order:
-  1. Call `multiprocessing.active_children()`, which reaps every child of this process that has exited,
-     including a held child of an earlier call.
+  1. If `deadline.expired()`, raise `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` without starting a
+     child. Otherwise call `multiprocessing.active_children()`, which reaps every child of this process that has
+     exited, including a held child of an earlier call.
   2. With `context = multiprocessing.get_context(CHILD_START_METHOD)`, open
      `receiver, sender = context.Pipe(duplex=False)`, start
      `context.Process(target=_child_main, args=(sender, target, args))`, and close the parent's `sender`. When
@@ -431,20 +446,29 @@ baseline is commit `4438234`.
      be referenced by name: no child runs, and `run_in_child` raises
      `ProviderLookupError(NO_DEADLINE_REASON, NO_DEADLINE_NEXT_ACTION)`, as under non-cooperative option (a).
   3. Receive the outcome in a daemon thread named `CHILD_RECEIVER_THREAD_NAME`, which runs `_receive_outcome`, and
-     wait for that thread with `receiver_thread.join(deadline.remaining())`. An outcome counts only when the thread
-     has finished by the deadline, so a partial or slow frame counts as nothing complete and cannot hold the parent
-     past the deadline. A `None` in `box` means that the child closed the pipe without an outcome. With an unbounded
-     deadline, the parent calls `receiver_thread.join()` with no timeout, because `join` rejects an infinite one.
+     wait for that thread with `receiver_thread.join(deadline.remaining())`. With an unbounded deadline, the parent
+     calls `receiver_thread.join()` with no timeout, because `join` rejects an infinite one. Step 3 ends with what
+     the thread has finished by then: one complete outcome, a `None` when the child closed the pipe without an
+     outcome, or nothing complete. A partial or slow frame is nothing complete, and whatever the thread appends
+     after step 3 ends is ignored.
   4. Pass the exit gate, on every path. It is bounded by
-     `gate = Deadline.after(LOOKUP_SHUTDOWN_GRACE_SECONDS, clock=deadline.clock)`, made when step 3 ends:
+     `gate = Deadline.after(CHILD_EXIT_GATE_SECONDS, clock=deadline.clock)`, made when step 3 ends:
      - with nothing complete, kill the child at once (`Process.kill`, `SIGKILL` on POSIX); with an outcome or a
        `None`, call `process.join(gate.remaining() / 2)` first, and kill the child if it is still alive;
-     - call `process.join(gate.remaining())`, then `receiver_thread.join(gate.remaining())`;
-     - the exit is confirmed when `process.exitcode` is set. The receiver thread has then ended, because the pipe's
-       only writer has exited.
+     - call `process.join(gate.remaining())`;
+     - the exit is confirmed when `process.exitcode` is set, or when
+       `multiprocessing.connection.wait([process.sentinel], 0)` returns the sentinel, which also covers a child that
+       another reaper collected first;
+     - only after a confirmed exit, call `receiver_thread.join(gate.remaining())`. The thread has then ended or ends
+       at once, because the child's end of the pipe is closed. After an unconfirmed exit, the parent does not wait
+       for the thread.
 
-     The call therefore returns within the deadline plus the grace.
-  5. Return or raise, from what the parent has:
+     `CHILD_EXIT_GATE_SECONDS` is half of `LOOKUP_SHUTDOWN_GRACE_SECONDS`, so `run_in_child` returns within the
+     deadline plus half the grace. It therefore returns before the router's wait for its future ends, and the
+     router sees `CHILD_LINGERING_REASON` rather than its own timeout. When any exception, including
+     `KeyboardInterrupt`, leaves step 3 or 4 early, a `finally` kills a child that is still alive, joins it for at
+     most `CHILD_EXIT_GATE_SECONDS`, and the exception propagates.
+  5. Return or raise, from what step 3 ended with:
 
   | Outcome by the deadline | Exit | Result |
   | --- | --- | --- |
@@ -460,7 +484,9 @@ baseline is commit `4438234`.
   The parent unpickles an outcome only in a confirmed row. When the exit is not confirmed, a received outcome is
   discarded without being unpickled: its value is never returned, stored, or logged. No payload limit applies; a
   frame that is still arriving at the deadline counts as nothing complete.
-- **Behavior of `_child_main`,** in the child. It calls `target(*args)` and pickles one outcome:
+- **Behavior of `_child_main`,** in the child. On POSIX it first calls `os.set_inheritable(sender.fileno(), False)`:
+  spawn passes the pipe through `pass_fds`, which leaves it inheritable, and no process that the provider starts
+  may hold the pipe open. It then calls `target(*args)` and pickles one outcome:
   - a return gives `(RESULT, value)`;
   - `ProviderNotApplicable` gives `(NOT_APPLICABLE,)`;
   - `ProviderLookupError` gives `(LOOKUP_ERROR, error.reason, error.next_action, error.matches)`;
@@ -471,10 +497,10 @@ baseline is commit `4438234`.
   that pickle cannot send, an IO stream or any other, is never materialized in the parent. This is the recommended
   option of the [child read decision](#alternatives-for-the-owners-decision). The child sends the bytes with
   `sender.send_bytes` and ends with `os._exit(0)`, so no thread that the provider started keeps it alive.
-- **A held child:** a killed child whose `exitcode` is still `None` after step 4 is held by the operating system in
-  an uninterruptible wait. It stays in the set of children that the parent's `multiprocessing` module keeps, and
-  step 1 of a later call reaps it once it has exited. Its receiver thread, a daemon thread, stays blocked until the
-  child exits, and then ends. At interpreter exit, `multiprocessing` joins every child it still holds, with no time
+- **A held child:** a killed child whose exit is not confirmed after step 4 is held by the operating system in an
+  uninterruptible wait. It stays in the set of children that the parent's `multiprocessing` module keeps, and step
+  1 of a later call reaps it once it has exited. Its receiver thread, a daemon thread, stays blocked until the child
+  exits, and then ends. At interpreter exit, `multiprocessing` joins every child it still holds, with no time
   limit, so a held child delays the parent's exit until the operating system releases it. This is the weaker part
   that non-cooperative option (b) and dotenv option (b) state for the owner.
 - **No provider branch:** under dotenv option (b), `DotEnvProvider` calls `run_in_child` itself for a declared file
@@ -629,6 +655,8 @@ In `src/hiddengems/constants/lookup.py`, beside the constants the overview alrea
 - `CHILD_LINGERING_REASON: Final[str] = "The provider's child process was killed, but the operating system still
   holds it"` and `CHILD_LINGERING_NEXT_ACTION: Final[str] = "Check the device or mount the provider reads, then
   retry"`, used by `run_in_child` for a killed child whose exit is not confirmed.
+- `CHILD_EXIT_GATE_SECONDS: Final[float] = LOOKUP_SHUTDOWN_GRACE_SECONDS / 2`: the bound of the exit gate of
+  `run_in_child`, half the grace, so that `run_in_child` returns before the router's wait for its future ends.
 - `CHILD_RECEIVER_THREAD_NAME: Final[str] = "hiddengems-child-receiver"`: names the thread in which `run_in_child`
   receives the outcome, so a test can show that it ends with a confirmed exit.
 - `CHILD_ERROR_MESSAGE: Final[str] = "The provider raised {error_type} in its child process"` and
@@ -825,25 +853,33 @@ In `tests/test_hidden_gems_routing.py`:
 - `test_kernel_held_child_is_reported_apart_from_a_confirmed_exit`, under non-cooperative option (b) or dotenv
   option (b).
   - Input: `run_in_child` with `multiprocessing.get_context` patched to a fake context. Its `Process` records
-    `start` and `kill`; its `join(timeout)` returns at once; its `exitcode` stays `None` and `is_alive()` stays
-    true while the test holds it. Its `Pipe` gives a receiving end whose `recv_bytes` blocks until the test releases
-    it. A spy wraps `multiprocessing.active_children`.
+    `start` and `kill`; its `join(timeout)` returns at once; its `exitcode` stays `None` while the test holds it;
+    and its `sentinel` is the read end of a pipe whose write end the test keeps open meanwhile, so it is never
+    ready. Its `Pipe` gives a receiving end whose `recv_bytes` blocks until the test releases it. A spy wraps
+    `multiprocessing.active_children`.
   - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_LINGERING_REASON` within 0.2 seconds plus
-    the grace; `kill` was called; `exitcode` is still `None` when the call returns, so the return is not taken as a
-    confirmed exit; a second `run_in_child` call calls `multiprocessing.active_children()` before it starts its
-    child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
+    `CHILD_EXIT_GATE_SECONDS`; `kill` was called; the exit is still unconfirmed when the call returns, and the
+    receiver thread is still blocked, so the return is not taken as a confirmed exit. After the test releases the
+    fake, the receiver thread ends, and a second `run_in_child` call calls `multiprocessing.active_children()` before
+    it starts its child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
     `TIMEOUT_REASON` and a set `exitcode`.
 - `test_child_result_requires_confirmed_exit_before_return`, under non-cooperative option (b) or dotenv option (b).
-  - Input: the fake context of the case above, with a real `Pipe`. The test writes one complete `RESULT` outcome
-    into the sending end before the deadline, and the fake `Process` stays alive after `join` and `kill`. The value
-    is an instance of a test class whose unpickling records that it ran.
-  - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_LINGERING_REASON` within 0.2 seconds plus the
-    grace, never returns the value, and never unpickles it: the record stays empty. `kill` was called.
+  - Input: the fake context of the case above, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake
+    writes one complete `RESULT` outcome into the sending end. The fake `Process` stays alive after `join` and
+    `kill`, with a sentinel that is never ready. The value is an instance of a test class whose unpickling records
+    that it ran.
+  - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_LINGERING_REASON` within 0.2 seconds plus
+    `CHILD_EXIT_GATE_SECONDS`, never returns the value, and never unpickles it: the record stays empty. `kill` was
+    called.
 - `test_child_partial_outcome_does_not_escape_deadline`, under non-cooperative option (b) or dotenv option (b).
-  - Input: a real child, with `child_runner._child_main` patched to a module-level function of the test module that
-    writes only the frame header of a larger message to the pipe's file descriptor and then sleeps.
-  - Expected: `run_in_child` raises `ProviderLookupError` with `TIMEOUT_REASON` within 0.2 seconds plus the grace;
-    `kill` ended the child (`exitcode` is set); no thread named `CHILD_RECEIVER_THREAD_NAME` is alive afterwards.
+  - Input: the fake context, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake writes only the
+    frame header of a larger message into the sending end and keeps a duplicate of that end's descriptor open, so
+    the receiving end blocks waiting for the body. The fake `Process` is alive until its `kill`, which closes the
+    duplicate, sets `exitcode`, and makes its sentinel ready.
+  - Expected: the fake recorded the header write before step 3 began; `run_in_child` raises `ProviderLookupError`
+    with `TIMEOUT_REASON` within 0.2 seconds plus `CHILD_EXIT_GATE_SECONDS`; afterwards no thread named
+    `CHILD_RECEIVER_THREAD_NAME` is alive. Revision 7, which called `recv_bytes` after a timed `poll`, would block in
+    `recv_bytes` here and fail this case.
 - `test_lookup_with_no_records_skips_the_pool`.
   - Input: `HiddenGems(providers=(), config_path=tmp_path / "missing.json")`.
   - Expected: `dig_gem` raises `GemNotFoundError`, as today, and no thread whose name starts with
