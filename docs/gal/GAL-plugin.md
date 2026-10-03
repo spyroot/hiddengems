@@ -1,10 +1,14 @@
 # GAL-plugin: provider contract and writable capability
 
-Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 6. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
 writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
 
-Revision 5 adds three things:
+Revision 6 adds the [Exceptions](#exceptions) section required by the overview's
+[exception rules](../provider-routing-design.md#exception-consistency), and the check that enforces them,
+`test_exception_classes_match_the_register`.
+
+Revision 5 added three things:
 
 - the [Abstraction-extension gate](#abstraction-extension-gate) section, declaring each extension's signature,
   behavior, implementation owner, actual caller, and acceptance tests;
@@ -411,6 +415,38 @@ None. The only baseline uses of `put_gem` and `hide_gem` are in `tests/test_hidd
 
 The baseline stays commit `4438234`. This proposal does not redefine `B`.
 
+## Exceptions
+
+One new class and one reuse, under the overview's exception rules:
+
+- **New: `ProviderNotWritableError(NotImplementedError)`,** in `hidden_gems.py`.
+  - Needed because a caller of `hide_gem` must tell "this provider cannot store gems" apart from "no provider
+    matched" and from a failure inside a writer.
+  - Closest existing class: `ProviderNotAvailableError(LookupError)` (`abstraction.py:12`), which means that no
+    provider matched the selection. Here exactly one matched, and it cannot store.
+  - Base: `NotImplementedError`, because the three stubs raise it today (`k8s_provider.py:610-625`,
+    `onepassword_provider.py:489-498`, `keyring_provider.py:216-232`). An existing `except NotImplementedError`
+    still catches it.
+  - Attributes `provider`, `instance_id`, and `observation`; the message names the provider and instance only.
+  - Cases: `test_hide_gem_rejects_read_only_provider_before_any_call` asserts that it is a `NotImplementedError`
+    and that neither the gem name nor the value is in its message.
+- **Reused: `TypeError`** from `write_capability` for an input that is not an `AbstractGemProvider` subclass.
+  This is a programming error in the caller, which is what `TypeError` already means.
+- **Warning reused: `DeprecationWarning`** with `LEGACY_WRITER_WARNING`, under the legacy writer path. A legacy
+  writer is a deprecated way to declare writing, which is what `DeprecationWarning` already means.
+
+The check that enforces the rules for every feature is delivered here, because this is the first feature that
+adds a class:
+
+- **`test_exception_classes_match_the_register`,** in `tests/contract/test_provider_contract.py`.
+  - Input: every module under `hiddengems`, imported with `pkgutil.walk_packages`.
+  - It collects each class derived from `BaseException` whose `__module__` starts with `hiddengems`, warnings
+    included, as `(module, name, direct bases)`.
+  - Expected: equal to `EXPECTED_EXCEPTIONS`, a literal set in the test. It holds the nine classes of `E_B` with
+    their bases, plus `("hiddengems.hidden_gems", "ProviderNotWritableError", ("NotImplementedError",))`.
+  - An undeclared class, a changed base, or a missing baseline class fails. Each later feature that adds a class
+    adds its entry to this set in its own pull request.
+
 ## Before and after
 
 What this feature adds, against today's contract:
@@ -589,6 +625,7 @@ Cases:
     `WRITE_LEGACY_REASON`; one `DeprecationWarning` naming the subclass; the inherited `put_gem` called once;
     its `GemReference` returned.
   - Expected without it: `ProviderNotWritableError` with state `UNKNOWN`; `put_gem` never called.
+- `test_exception_classes_match_the_register`, as specified under [Exceptions](#exceptions).
 - `test_write_capability_rejects_a_non_provider_class`.
   - Input: `object`, the string `"dotenv"`, and a class with a `put_gem` that does not subclass
     `AbstractGemProvider`.
