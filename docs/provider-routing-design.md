@@ -383,7 +383,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-write-target` | `hide_gem(target=...)` writes through one named target | [Writes](#46-writes) |
 | `GAL-chooser` | Caller picks from a `candidates` dict; `remember=True` saves it | [Router](#45-router-and-resolution) |
 | `GAL-explain` | `explain(name)` reports a routing decision without reading values | [Router](#45-router-and-resolution) |
-| `GAL-parallel` | Parallel lookup under a deadline, except two stated limits | [GAL-parallel.md](gal/GAL-parallel.md) |
+| `GAL-parallel` | Parallel lookup under a deadline that every provider call honors | [GAL-parallel.md](gal/GAL-parallel.md) |
 | `GAL-cli-detect` | `detect` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-targets` | `targets` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-explain` | `explain` command | [Additional pieces](#7-additional-pieces) |
@@ -450,6 +450,7 @@ Nothing is rewritten wholesale.
 +   atomic_file.py                           GAL-chooser (locked file rewrite moved out of dotenv_provider), used by
                                              GAL-remember and GAL-secure-cache
 +   canonical_json.py                        GAL-chooser (typed encoding), used by GAL-remember, GAL-secure-cache
++   child_runner.py                          GAL-parallel (run_in_child for a killable bounded call)
 +   chooser.py                               GAL-chooser (prompt moved out of resolve_gem)
 +   cli.py                                   GAL-cli-detect, then one subcommand per GAL-cli-* feature
 +   config.py                                GAL-targets (config reading moved out of HiddenGems.__init__),
@@ -489,7 +490,7 @@ Nothing is rewritten wholesale.
 +     keychain_constants.py                  GAL-settings, GAL-parallel, GAL-remember
       keychainorpasswordread.cpp
 ~     keyring_provider.py                    GAL-plugin, GAL-settings, GAL-sdk-optional, GAL-parallel, GAL-remember
-+     kubernetes_constants.py                GAL-settings, GAL-expand, GAL-kube-contexts, GAL-remember
++     kubernetes_constants.py                GAL-settings, GAL-expand, GAL-kube-contexts, GAL-parallel, GAL-remember
 +     onepassword_constants.py               GAL-settings, GAL-parallel, GAL-remember
 ~     onepassword_provider.py                GAL-plugin, GAL-settings, GAL-selector, GAL-discovery, GAL-parallel,
                                              GAL-remember
@@ -595,7 +596,8 @@ Non-functional:
 
 - Detection stays local and bounded: no network, no prompt, no credential plugin execution.
 - Lookup across targets runs concurrently under one time limit per lookup, which every provider call honors,
-  except under the two known limits stated in [GAL-parallel.md](gal/GAL-parallel.md). Results stay deterministic.
+  except, under one owner option in [GAL-parallel.md](gal/GAL-parallel.md), a read of a declared dotenv file on an
+  unresponsive mount. Results stay deterministic.
 - Optional provider dependencies stay optional. A missing SDK is reported as evidence, not as an `ImportError`.
 - Unit tests need no network or real credentials.
 
@@ -778,9 +780,10 @@ Then:
   some providers but not others leaves those others `not applicable`, which is today's behavior for valid
   keys.
 - **Fan-out.** `find_gem_within()` runs on a thread pool bounded by `LOOKUP_WORKERS`, under one `Deadline` of
-  `LOOKUP_TIMEOUT_SECONDS` per lookup, and every provider call stops at it, except under the two known limits
-  stated in [GAL-parallel.md](gal/GAL-parallel.md). A provider that runs out of time becomes a `LookupIssue`.
-  Results are merged in record order, not completion order, so output is deterministic.
+  `LOOKUP_TIMEOUT_SECONDS` per lookup, and every provider call stops at it, except, under one owner option in
+  [GAL-parallel.md](gal/GAL-parallel.md), a read of a declared dotenv file on an unresponsive mount. A provider
+  that runs out of time becomes a `LookupIssue`. Results are merged in record order, not completion order, so
+  output is deterministic.
 - **`explain(name)`** returns the scope rule that fired, the targets in scope, and the selector, plus each
   target's state and capabilities. It reads no value.
 
@@ -828,8 +831,9 @@ in it is `Final[str]`:
   `GAL-parallel`).
 - `TIMEOUT_REASON: Final[str] = "Lookup time limit reached"` and
   `TIMEOUT_NEXT_ACTION: Final[str] = "Check that the target is reachable, then retry"` (`GAL-parallel`).
-- `LOOKUP_SHUTDOWN_GRACE_SECONDS`, `LOOKUP_THREAD_PREFIX`, `NO_DEADLINE_REASON`, `NO_DEADLINE_NEXT_ACTION`, and
-  `CHILD_START_METHOD`, listed in [GAL-parallel.md](gal/GAL-parallel.md#constants) (`GAL-parallel`).
+- `LOOKUP_SHUTDOWN_GRACE_SECONDS`, `LOOKUP_THREAD_PREFIX`, `NO_DEADLINE_REASON`, `NO_DEADLINE_NEXT_ACTION`,
+  `CHILD_TRANSPORT_REASON`, `CHILD_TRANSPORT_NEXT_ACTION`, and `CHILD_START_METHOD`, listed in
+  [GAL-parallel.md](gal/GAL-parallel.md#constants) (`GAL-parallel`).
 - `CANDIDATE_INDEX_PREFIX: Final[str] = "@"`: marks the index form of a candidate key, used when a location
   cannot be encoded (`GAL-chooser`).
 - `CANDIDATE_KEY_SEPARATOR: Final[str] = "#"`: joins instance id and location in a candidate key
@@ -892,6 +896,8 @@ in it is `Final[str]`:
 
 `src/hiddengems/gems/kubernetes_constants.py` (`GAL-settings` unless noted):
 
+- `KUBE_READ_SLICE_SECONDS` and `KUBE_READ_CHUNK_BYTES`, listed in [GAL-parallel.md](gal/GAL-parallel.md#constants)
+  (`GAL-parallel`).
 - `MAX_DIRECTORY_ENTRIES: Final[int] = 64` and `MAX_AUTO_CONFIG_BYTES: Final[int] = 2 * 1024 * 1024`: the
   values of the `KubernetesProvider` class attributes, which stay as the read path.
 - `DEFAULT_NAMESPACE: Final[str] = "default"`, `KUBECONFIG_ENV_VAR: Final[str] = "KUBECONFIG"`,
@@ -1161,7 +1167,9 @@ blocks. A default is a recommendation, not a decision; each entry stays open unt
 - **`GAL-parallel` choices:** listed in
   [GAL-parallel.md](gal/GAL-parallel.md#alternatives-for-the-owners-decision). An `UNKNOWN` provider (default:
   call it in process, with a `DeprecationWarning`); a non-cooperative provider (default: run it in a child
-  process); the Keychain (default: query without interactive UI). Blocks: `GAL-parallel`.
+  process); the Keychain (default: query without interactive UI); a child read of a value that cannot cross the
+  pipe (default: the declared rejection); the read of a declared dotenv file on an unresponsive mount (default:
+  through the child runner when the file's device differs from the home directory's). Blocks: `GAL-parallel`.
 - **`GAL-remember` choices:** listed in
   [GAL-remember.md](gal/GAL-remember.md#alternatives-for-the-owners-decision). What `HiddenGems.invalidate()`
   leaves behind (default: detect again); reusing remembered records (default: all or nothing); where the
@@ -1192,14 +1200,15 @@ blocks. A default is a recommendation, not a decision; each entry stays open unt
 - **`GAL-class-preference`:** may one answer resolve every gem with the same found set `R(g)`, and how is that
   shown in `explain`?
   Default: not offered before `GAL-chooser` ships. Blocks: nothing yet.
-- **`GAL-secure-cache`:** proposed in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 4. The lifecycle
+- **`GAL-secure-cache`:** proposed in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 5. The lifecycle
   is settled there: one epoch per period with two random keys (`seal` and `index`), a fixed period of
   `CACHE_PERIOD_SECONDS` that configuration may shorten to no less than `CACHE_MIN_PERIOD_SECONDS`, and
   retirement in the order revoke, destroy key, delete records. Owner choices, with recommendations, in that
   file: key placement (default: `FileCacheKeyStore` in `~/.hiddengem`, `0700` and `0600`), the async contract
   (default: deliver now), a timed-out wait (default: `IncompleteGemLookupError`), a failed refresh (default:
-  keep the record), a write through `hide_gem` (default: invalidate the whole cache), and what one
-  authentication unlocks (default: one request identity). Blocks: `GAL-secure-cache` and `GAL-encrypted-store`.
+  keep the record), a write through `hide_gem` (default: invalidate the whole cache), what one authentication
+  unlocks (default: one request identity), and a hit's linearization point (default: its check after decoding).
+  Blocks: `GAL-secure-cache` and `GAL-encrypted-store`.
 - **`GAL-kube-extra`:** should `kubernetes` (and later cloud SDKs) become optional extras?
   Default: yes. Blocks: the packaging part of `GAL-sdk-optional`.
 - **`GAL-routing`:** are pattern routes wanted, given that they relax full-scope duplicate detection for routed
@@ -1592,12 +1601,14 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 5. It replaces the earlier entry here, which
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 6. It replaces the earlier entry here, which
 bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
 `cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline` (the
 Keychain under Keychain option (a)), a timeout becomes a `LookupIssue`, matches merge in record order, and
-shutdown waits for every running call, which is bounded except under the two known limits that file states: a
-slow but steady Kubernetes response and a declared dotenv file on an unresponsive mount.
+shutdown waits for every running call. Kubernetes reads are bounded by reading the body in single-socket-read
+chunks under the deadline. The read of a declared dotenv file on an unresponsive mount is the owner's decision
+there: under the recommended option, such a file is read through the shared child runner `run_in_child`, so
+the lookup stays bounded; under the other, the lookup waits for that read.
 
 - **Blocked by:** `GAL-plugin`, `GAL-settings`, `GAL-scope`, `GAL-chooser`, `GAL-discovery` under non-cooperative
   option (b), and the `GAL-parallel` choices.
@@ -1643,7 +1654,7 @@ slow but steady Kubernetes response and a declared dotenv file on an unresponsiv
 
 ### GAL-remember
 
-Specified in [GAL-remember.md](gal/GAL-remember.md), revision 5. `AbstractGemProvider` gains `invalidate()`,
+Specified in [GAL-remember.md](gal/GAL-remember.md), revision 6. `AbstractGemProvider` gains `invalidate()`,
 a no-op by default, and `CachingGemProvider` implements the cache lifecycle once for providers that keep
 state. `HiddenGems.invalidate()` calls the declared hook on every `AbstractGemProvider` instance and collects a
 `TypeError` for any other instance. Detection is remembered in the config file and reused only while its
@@ -1678,7 +1689,7 @@ fingerprint is current and every record revalidates.
 
 ### GAL-secure-cache
 
-Specified in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 4. An opt-in `HiddenGems(cache=...)` holds
+Specified in [GAL-secure-cache.md](gal/GAL-secure-cache.md), revision 5. An opt-in `HiddenGems(cache=...)` holds
 resolved values encrypted for a fixed period, so repeated `dig_gem` calls for an unchanged request make no
 `find_gem` or `get_gem` call. `dig_gem(refresh=True)`, `hide_gem`, and `HiddenGems.invalidate()` end a cached
 choice. The cache is a separate contract; `AbstractGemProvider`, the factory, and the providers are unchanged.
