@@ -1,11 +1,24 @@
 # GAL-secure-cache: encrypted value cache in front of provider reads
 
-Status: proposal, revision 1. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 2. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
 [Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate) and its exception rules.
 The cache surface below is the owner's; this document gives every part its exact signature, behavior, owner,
 caller, and acceptance test.
+
+Revision 2 adds three rules from the owner, and corrects one definition:
+
+- **Per-call refresh.** `get_or_load` and `dig_gem` take `refresh: bool = False`. A caller that expects the
+  value to change outside the library passes `refresh=True`, on every call if it wants. That skips the hit,
+  reads the provider, and replaces the cached record.
+- **The caller's choice holds for the period.** A record keeps the reference that served it. The next
+  identical request gets that reference's cached value until the period ends, without resolving again.
+- **A new duplicate does not invalidate.** If the same gem appears in another provider during the period,
+  the cached choice stands. See [Choice within a period](#choice-within-a-period).
+- **Correction:** `routing_revision` covered the detected records in revision 1. A newly detected duplicate
+  would then have changed every request and ended the cached choice. It now covers only the explicit routing
+  configuration.
 
 ## Purpose and observable capability
 
@@ -39,6 +52,30 @@ HiddenGems.dig_gem
 
 `inspect_gem` and `resolve_gem` never use the cache. A failed lookup is never cached: `AmbiguousGemError`,
 `IncompleteGemLookupError`, `StaleGemPreferenceError`, and `GemNotFoundError` reach the caller as today.
+
+## Choice within a period
+
+The rule is generic: it holds for any providers `p₁` and `p₂`, built-in or third-party.
+
+```text
+t₀  dig_gem("x")                    R(x) = {p₁}        miss → resolves to p₁, reads, caches (x → p₁)
+t₁  dig_gem("x")                    R(x) = {p₁}        hit → p₁'s cached value; no find_gem, no get_gem
+t₂  x also appears in p₂            R(x) = {p₁, p₂}    nothing happens in the cache
+t₃  dig_gem("x")                    R(x) = {p₁, p₂}    hit → p₁'s cached value; the caller's choice holds
+t₄  dig_gem("x", refresh=True)      R(x) = {p₁, p₂}    resolves again → AmbiguousGemError with both candidates;
+                                                       the caller decides
+```
+
+- **Why the choice holds:** the record was made by a successful resolution and belongs to the caller's period.
+  Choosing between `p₁` and `p₂` is the caller's decision, and the caller has already made one for this period.
+- **What ends it:** `refresh=True` on a call, `invalidate()`, a write through `hide_gem`, a change to the
+  explicit routing configuration, or the end of the period.
+- **Relation to `docs/README.md`:** it forbids a silent choice among duplicates. Within a period, an earlier
+  choice outlives a duplicate that appeared later. This happens only when the caller passes a cache. It is
+  bounded by the period, and `refresh=True` brings the ambiguity back at once. Contract impact lists it as a
+  relaxation.
+- **Example names:** with `p₁` the 1Password instance and `p₂` a dotenv file, x keeps coming from 1Password
+  until one of the events above.
 
 ## Scope
 
@@ -88,8 +125,12 @@ In `src/hiddengems/secret_cache.py`, all frozen dataclasses:
 - **`CacheRequest(name: str, selection: str, routing_revision: str)`.**
   - `selection` is the canonical JSON of `{"provider": provider, "criteria": criteria, "preference":
     HiddenGems.preferences.get(name)}`, with sorted keys and `default=str`.
-  - `routing_revision` is the SHA-256 hex digest of the canonical JSON of the detected records'
-    `(provider, instance_id, state, settings)` and of `HiddenGems.preferences`.
+  - `routing_revision` is the SHA-256 hex digest of the canonical JSON of the explicit routing configuration:
+    the merged `providers` settings and `HiddenGems.preferences`, the inputs the caller and the config file
+    control. It does not cover the detected records, so detection finding a new instance or a new copy of a
+    gem changes no request.
+  - When `GAL-chooser` lands, its `choice` argument joins `selection`, so a request made with a choice is a
+    different request from one made without it.
   - `canonical(self) -> bytes` returns the canonical JSON of the three fields.
 - **`ResolvedGem(reference: GemReference, values: list[Gem])`.**
 - **`CacheEpoch(generation: str, created_at: datetime, expires_at: datetime, key_id: str)`.**
@@ -177,10 +218,13 @@ class that leaves an operation unimplemented cannot be instantiated.
 
 | Operation | Signature | Behavior |
 | --- | --- | --- |
-| `get_or_load` | `(self, request: CacheRequest, loader: GemLoader, *, deadline: Deadline) -> list[Gem]` | below |
+| `get_or_load` | `(self, request, loader, *, deadline, refresh=False) -> list[Gem]` | below |
 | `invalidate` | `(self) -> None` | retires the current epoch: revoke, destroy, delete |
 | `expire` | `(self) -> None` | runs the retirement order for every epoch past `d_e`; others untouched |
 | `close` | `(self) -> None` | releases holds and wipes in-memory keys; persisted epochs stay usable by others |
+
+The full signature is `get_or_load(self, request: CacheRequest, loader: GemLoader, *, deadline: Deadline,
+refresh: bool = False) -> list[Gem]`.
 
 **`SecretCache.get_or_load`**, the concrete orchestration:
 
@@ -194,10 +238,12 @@ class that leaves an operation unimplemented cannot be instantiated.
 3. Enter `coordinator.hold(identity, deadline)`. On `HoldState.EXPIRED`, raise
    `TimeoutError` with `CACHE_WAIT_TIMEOUT_REASON`. Waits for the same identity are serialized, and
    different identities proceed at the same time.
-4. `store.read(identity, epoch)`. A `CacheRecord` that passes `cipher.open` and `codec.decode` is a hit: return
+4. With `refresh=True`, skip the read and go to step 5. Otherwise `store.read(identity, epoch)`. A
+   `CacheRecord` that passes `cipher.open` and `codec.decode` is a hit: return
    the decoded values. Each call decodes again, so the caller gets new objects. A `CacheMiss`, a
    `CacheIntegrityError`, or an expired epoch is a miss.
-5. On a miss, call `loader(deadline)`. Its exceptions propagate unchanged, and nothing is stored.
+5. On a miss, or with `refresh=True`, call `loader(deadline)`. Its exceptions propagate unchanged, and nothing
+   is stored. A refresh that fails leaves the existing record in place.
 6. Encode the values. A value the codec does not support, such as an `IO` stream, raises `TypeError`; the
    values are then returned without storing. A payload larger than `CACHE_MAX_VALUE_BYTES` is not stored
    either.
@@ -212,8 +258,8 @@ dependencies.
 
 ### `AbstractAsyncSecretCache`
 
-The same four operations as `async def`, with `loader: AsyncGemLoader`. `AsyncSecretCache` behaves as above,
-and also:
+The same four operations as `async def`, with `loader: AsyncGemLoader` and the same `refresh` keyword.
+`AsyncSecretCache` behaves as above, and also:
 
 - coordination inside the loop uses one `asyncio.Lock` per identity; the file coordinator's waits run through
   `asyncio.to_thread`;
@@ -358,13 +404,16 @@ A profile is a declared, supported combination. The contract suite runs on every
 - **`__init__(..., cache: AbstractSecretCache = PASS_THROUGH_CACHE)`,** a keyword-only parameter after
   `refresh` from `GAL-remember`. It stores `cache` and computes `self._routing_revision` as defined under
   `CacheRequest`.
-- **`dig_gem`** keeps its signature. Its body becomes:
+- **`dig_gem`** gains the keyword-only parameter `refresh: bool = False`, after `criteria`. Its body becomes:
   1. `request = CacheRequest(name, selection, self._routing_revision)`;
   2. `deadline = Deadline.after(LOOKUP_TIMEOUT_SECONDS)`;
   3. `loader(deadline)` runs today's path: `reference = self.resolve_gem(...)`, then the read
      `get_gem_within(reference, deadline=deadline)` from `GAL-parallel`, giving `ResolvedGem(reference,
      values)`;
-  4. `return self._cache.get_or_load(request, loader, deadline=deadline)`.
+  4. `return self._cache.get_or_load(request, loader, deadline=deadline, refresh=refresh)`.
+
+  This `refresh` re-reads one value. The `refresh` of `HiddenGems.__init__` from `GAL-remember` re-runs
+  detection. They are separate parameters of separate methods.
 
   A `TimeoutError` from step 3 of `get_or_load` becomes `IncompleteGemLookupError` with one `LookupIssue`:
   `provider=CACHE_ISSUE_SOURCE`, `instance_id=CACHE_ISSUE_SOURCE`, `reason=CACHE_WAIT_TIMEOUT_REASON`, and
@@ -418,7 +467,9 @@ The baseline stays commit `4438234`. This proposal does not redefine `B`.
 
 ## Exceptions
 
-Two new classes, each needed because a caller must tell it apart from every existing class:
+Two new classes, each needed because a caller must tell it apart from every existing class. This feature's
+pull request adds both to `EXPECTED_EXCEPTIONS` in `test_exception_classes_match_the_register` of
+`GAL-plugin`:
 
 - **`CacheIntegrityError(ValueError)`,** in `secret_cache.py`.
   - Raised by `AbstractCacheCipher.open` and `AbstractGemCodec.decode`.
@@ -503,6 +554,10 @@ payload and the authenticated metadata.
   - (a) `IncompleteGemLookupError` at `dig_gem`, as above. Recommended: callers already handle it, and the set
     of errors `dig_gem` raises does not grow.
   - (b) let `TimeoutError` reach the caller.
+- **A refresh that fails:**
+  - (a) leave the existing record in place. Recommended: the store contract stays at the owner's three
+    operations, and the record was valid for the caller's period.
+  - (b) add `discard(identity, epoch)` to `AbstractCacheStore`, and drop the record before loading.
 - **A write through `hide_gem`:**
   - (a) invalidate the whole cache. Recommended: writes are rare, and the contract needs no operation to find
     records by name, which the HMAC identity hides on purpose.
@@ -555,9 +610,19 @@ Added by this proposal:
   epoch differ.
 - **S14** `test_pass_through_cache_keeps_baseline_behavior`: without `cache=`, every `dig_gem` calls
   `find_gem` and `get_gem`, as the baseline routing tests expect.
-- **S15** `test_hide_gem_invalidates_the_cache`: after a write, the next read goes to the provider.
+- **S15** `test_hide_gem_invalidates_the_cache`: the writer is `WritableEnvironmentProvider` from
+  `tests/contract/example_providers.py` (`GAL-plugin`), registered by replacing `GemProvider.provider_types`.
+  After a write, the next read goes to the provider.
 - **S16** `test_disk_profile_rejects_open_permissions`: a root with mode `0755`, or a record with mode `0644`,
   gives `SecretCacheWarning`, and the read goes to the provider.
+- **S17** `test_refresh_reloads_and_replaces_the_record`: after a hit, `refresh=True` calls the provider once,
+  and the next call without it returns the new value. A refresh whose loader fails raises that error, and
+  the next call without refresh still hits the old record.
+- **S18** `test_new_duplicate_does_not_end_the_choice`: the timeline under
+  [Choice within a period](#choice-within-a-period), with two fake providers `p₁` and `p₂`. At `t₃` there is
+  no `find_gem` call and the value is `p₁`'s. At `t₄` the result is `AmbiguousGemError` naming both.
+- **S19** `test_explicit_choice_is_kept_for_the_period`: `dig_gem("x", provider=p₁)` caches; the identical
+  request hits; `dig_gem("x")` without `provider` is a different request and resolves on its own.
 
 ## Dependencies on other features
 
