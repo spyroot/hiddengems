@@ -1,11 +1,22 @@
 # GAL-secure-cache: encrypted value cache in front of provider reads
 
-Status: proposal, revision 4. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
 [Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate) and its exception rules.
 The cache surface below is the owner's; this document gives every part its exact signature, behavior, owner,
 caller, and acceptance test.
+
+Revision 5 answers the review of revision 4. Destroying the live key makes the live records unreadable through
+the filesystem, and a backup or snapshot that holds both a key file and its records stays decryptable (GSC1).
+`selection`, `canonical()`, `routing_revision`, `CacheRecord.metadata`, and `JsonGemCodec` use the
+type-preserving encoding of `GAL-chooser`, and a request that cannot be encoded bypasses the cache (GSC2). A
+`refresh=True` whose reload fails leaves the record in place (GSC3). A hit checks its epoch and key again after
+the identity wait and after decoding, and the linearization of a hit and `invalidate()` is stated, with cases
+S24 and S25 (GSC4). `AsyncSecretCache` runs every blocking call on an executor it owns, and `close()` shuts that
+executor down (GSC6). Case S23 checks that one epoch uses one key pair for every identity (GSC8). `selection`
+holds `choice` when it is given and the preference when it is not, and `routing_revision` no longer covers
+preferences, so saving a choice does not change the request that made it (GSC10).
 
 Revision 4 applies the second round of decisions. With `remember=True` and a `choice`, `dig_gem` saves the choice
 after `get_or_load` returns, on a hit as on a miss. Providers in P states each applicable contract as `C`
@@ -85,13 +96,15 @@ t₁  dig_gem("x")                    R(x) = {p₁}        hit → p₁'s cached
 t₂  x also appears in p₂            R(x) = {p₁, p₂}    nothing happens in the cache
 t₃  dig_gem("x")                    R(x) = {p₁, p₂}    hit → p₁'s cached value; the caller's choice holds
 t₄  dig_gem("x", refresh=True)      R(x) = {p₁, p₂}    resolves again → AmbiguousGemError with both candidates;
-                                                       the caller decides
+                                                       the caller decides; the failed refresh leaves the p₁
+                                                       record in place
 ```
 
 - **Why the choice holds:** the record was made by a successful resolution and belongs to the caller's period.
   Choosing between `p₁` and `p₂` is the caller's decision, and the caller has already made one for this period.
-- **What ends it:** `refresh=True` on a call, `invalidate()`, a write through `hide_gem`, a change to the
-  explicit routing configuration, or the end of the period.
+- **What ends it:** a `refresh=True` whose reloaded result is published, `invalidate()`, a write through
+  `hide_gem`, a change to the explicit routing configuration, a change to the effective preference of a request
+  without `choice`, or the end of the period.
 - **Relation to `docs/README.md`:** it forbids a silent choice among duplicates. Within a period, an earlier
   choice outlives a duplicate that appeared later. This happens only when the caller passes a cache. It is
   bounded by the period, and `refresh=True` brings the ambiguity back at once. Contract impact lists it as a
@@ -132,7 +145,7 @@ Both AEAD classes are in `cryptography.hazmat.primitives.ciphers.aead`.
 | Request identity | `hmac.new(key, message, hashlib.sha256)` |
 | Atomic files | `atomic_file.rewrite_file` from `GAL-chooser`: temporary file, `mode`, `os.replace` |
 | File locks | `fcntl.flock` with `LOCK_EX` and `LOCK_NB`, polled until the deadline |
-| Async | `asyncio.Lock`, `asyncio.shield`, `asyncio.timeout`, `asyncio.to_thread` |
+| Async | `asyncio.Lock`, `asyncio.shield`, `asyncio.timeout`, `loop.run_in_executor` on a `ThreadPoolExecutor` |
 
 - **Checked:** in the `hiddengems` environment, `cryptography` 50.0.2 provides both AEAD classes with
   `generate_key`, `encrypt`, and `decrypt`. The tag adds 16 bytes, a ChaCha20-Poly1305 key is 32 bytes, and
@@ -145,18 +158,25 @@ Both AEAD classes are in `cryptography.hazmat.primitives.ciphers.aead`.
 In `src/hiddengems/secret_cache.py`, all frozen dataclasses:
 
 - **`CacheRequest(name: str, selection: str, routing_revision: str)`.**
-  - `selection` is `canonical_json` of the mapping from the `SELECTION_*_KEY` constants:
+  - `selection` is `canonical_json` of the effective selection, keyed by the `SELECTION_*_KEY` constants. When
+    `choice` is given, it is `{SELECTION_PROVIDER_KEY: provider, SELECTION_TARGET_KEY: target,
+    SELECTION_CRITERIA_KEY: criteria, SELECTION_CHOICE_KEY: choice}`. When it is not, it is
     `{SELECTION_PROVIDER_KEY: provider, SELECTION_TARGET_KEY: target, SELECTION_CRITERIA_KEY: criteria,
-    SELECTION_PREFERENCE_KEY: HiddenGems.preferences.get(name), SELECTION_CHOICE_KEY: choice}`.
+    SELECTION_PREFERENCE_KEY: HiddenGems.preferences.get(name)}`.
   - `routing_revision` is the SHA-256 hex digest of `canonical_json` of the explicit routing configuration:
-    the merged `providers` settings, `HiddenGems.preferences`, `GemConfig.targets`, `GemConfig.routes`, and
-    `GemConfig.discovery_local`, all delivered earlier. These are the inputs the caller and the config file
-    control. It does not cover the detected records, so detection finding a new instance or a new copy of a
-    gem changes no request.
+    the merged `providers` settings, `GemConfig.targets`, `GemConfig.routes`, and `GemConfig.discovery_local`,
+    all delivered earlier. These are the inputs the caller and the config file control. It does not cover the
+    detected records, so detection finding a new instance or a new copy of a gem changes no request. It does
+    not cover `HiddenGems.preferences` either; a preference enters only the `selection` of a request without
+    `choice`.
   - `GAL-chooser`'s `choice`, delivered earlier, is part of `selection`, so a request made with a choice is a
     different request from one made without it.
   - `canonical(self) -> bytes` returns `canonical_json` of the three fields, encoded as UTF-8.
-  - `canonical_json` is the shared function in `src/hiddengems/canonical_json.py`, from `GAL-chooser`.
+  - `canonical_json` is the type-preserving encoding in `src/hiddengems/canonical_json.py`, from `GAL-chooser`:
+    `to_typed`, `from_typed`, and `canonical_json`, with no `default=`. Values of different types, such as
+    `Path("/x")` and `"/x"`, never share an encoding, and an unsupported type raises `TypeError`.
+  - When building the `CacheRequest` raises `TypeError`, `dig_gem` bypasses the cache: it runs the loader
+    directly with the same deadline and stores nothing, so a valid lookup input is never narrowed.
 - **`ResolvedGem(reference: GemReference, values: list[Gem])`.**
 - **`CacheEpoch(generation: str, created_at: datetime, expires_at: datetime, key_id: str)`.**
   - `generation` and `key_id` come from `secrets.token_hex(CACHE_ID_BYTES)`.
@@ -173,7 +193,10 @@ In `src/hiddengems/secret_cache.py`, all frozen dataclasses:
   - `identity` is `hmac.new(keys.index, request.canonical(), hashlib.sha256).hexdigest()`. A file name never
     shows a gem name.
   - `metadata` is `canonical_json` of `CACHE_RECORD_FORMAT`, `identity`, `reference`, `epoch`, `codec`, and
-    `cipher`, encoded as UTF-8. It is passed to the cipher as associated data, so it is authenticated.
+    `cipher`, encoded as UTF-8; `reference` and `epoch` enter as the mappings of their fields
+    (`dataclasses.asdict`). It is passed to the cipher as associated data, so it is authenticated. When building
+    it raises `TypeError`, as for a `reference` whose `location` holds an unsupported value, the values are
+    returned without storing, as in step 6 of `get_or_load`.
   - `payload` is the adapter's output: its nonce followed by the ciphertext and tag.
 - **`CacheMiss(reason: MissReason)`**, the result of a read that found no usable record.
 
@@ -266,24 +289,35 @@ with its other step errors, and `hide_gem` lets it propagate after the write.
    - make a new epoch: `lifetime.new_epoch(key_id)`, `cipher.generate_key()` for `seal`,
      `secrets.token_bytes` for `index`, then `key_store.create(epoch, keys)`.
 2. Compute `identity` with the index key.
-3. Enter `coordinator.hold(identity, deadline)`. On `HoldState.EXPIRED`, raise
-   `TimeoutError` with `CACHE_WAIT_TIMEOUT_REASON`. Waits for the same identity are serialized, and
-   different identities proceed at the same time.
+3. Enter `coordinator.hold(identity, deadline)`. On `HoldState.EXPIRED`, raise `TimeoutError` with
+   `CACHE_WAIT_TIMEOUT_REASON`. Waits for the same identity are serialized, and different identities proceed at
+   the same time. Once the hold is acquired, call `key_store.acquire(lifetime.is_valid)` again. If the epoch
+   changed or the key is rejected, release the hold and restart from step 1; the deadline bounds the restarts.
 4. With `refresh=True`, skip the read and go to step 5. Otherwise `store.read(identity, epoch)`. A
-   `CacheRecord` that passes `cipher.open` and `codec.decode` is a hit: return
-   the decoded values. Each call decodes again, so the caller gets new objects. A `CacheMiss`, a
-   `CacheIntegrityError`, or an expired epoch is a miss.
+   `CacheRecord` that passes `cipher.open` and `codec.decode` is checked again: `lifetime.is_valid(epoch)` must
+   hold, and `key_store.acquire(lifetime.is_valid)` must return the same `key_id`. If both hold, it is a hit:
+   return the decoded values. Each call decodes again, so the caller gets new objects. If either fails, the hit
+   is discarded and the request is a miss. A `CacheMiss`, a `CacheIntegrityError`, or an expired epoch is a
+   miss.
 5. On a miss, or with `refresh=True`, call `loader(deadline)`. Its exceptions propagate unchanged, and nothing
-   is stored. A refresh that fails leaves the existing record in place.
-6. Encode the values. A value the codec does not support, such as an `IO` stream, raises `TypeError`; the
-   values are then returned without storing. A payload larger than `CACHE_MAX_VALUE_BYTES` is not stored
-   either.
+   is stored. With `refresh=True`, a reload whose result is published in step 7 replaces the record. When the
+   reload fails, or its result is not published (a value the codec does not support, a payload over
+   `CACHE_MAX_VALUE_BYTES`, or a commit that returns `RETIRED` or `FULL`), the record of that identity stays
+   until the period ends, `invalidate()`, or a later refresh whose result is published; a failed reload's error
+   reaches the caller.
+6. Encode the values and build the metadata. A value the codec does not support, such as an `IO` stream,
+   raises `TypeError`, and so does metadata that `canonical_json` cannot encode; the values are then returned
+   without storing. A payload larger than `CACHE_MAX_VALUE_BYTES` is not stored either.
 7. Seal the payload with the metadata as associated data. Enter the generation fence, call
    `key_store.acquire(lifetime.is_valid)` again, and commit with `store.commit_if_current(record,
    current=<that epoch>)`. On `HoldState.EXPIRED`, publish nothing and go to step 8. A rejection, `RETIRED`, or
    `FULL` publishes nothing. Because `invalidate` and `expire` revoke inside the same fence, a commit can never
    land in a retired generation.
 8. Return the loaded values.
+
+**Linearization.** A hit's linearization point is the check after decoding in step 4: a hit that passed it
+returns even if `invalidate()` starts afterwards. The linearization point of `invalidate` is its `revoke` under
+the generation fence, so a hit whose check runs after that `revoke` is a miss.
 
 The orchestration contains no cipher name, no file path, and no provider name. It sees only the six injected
 dependencies.
@@ -293,13 +327,21 @@ dependencies.
 The same four operations as `async def`, with `loader: AsyncGemLoader` and the same `refresh` keyword.
 `AsyncSecretCache` behaves as above, and also:
 
-- coordination inside the loop uses one `asyncio.Lock` per identity; the file coordinator's waits run through
-  `asyncio.to_thread`;
+- it owns `ThreadPoolExecutor(max_workers=CACHE_ASYNC_WORKERS, thread_name_prefix=CACHE_THREAD_PREFIX)` and
+  runs every blocking call with `loop.run_in_executor(self._executor, ...)`, never `asyncio.to_thread`. Every
+  call it submits is bounded: lock waits poll until the deadline, and storage and cipher calls work on the local
+  cache root;
+- coordination inside the loop uses one `asyncio.Lock` per identity; the file coordinator's waits run on the
+  owned executor;
 - the owner's load runs as one task, and waiters await it through `asyncio.shield`. Cancelling a waiter never
   cancels the owner. If the owner is cancelled or fails, the hold is released and the next waiter loads;
 - the loader runs under `asyncio.timeout(deadline.remaining())`;
-- storage and cipher calls run through `asyncio.to_thread`, so the event loop keeps running;
-- `close()` cancels the tasks it owns and awaits them.
+- storage and cipher calls run on the owned executor, so the event loop keeps running;
+- `close()` cancels the tasks it owns, awaits them, then calls `self._executor.shutdown(wait=True,
+  cancel_futures=True)`, so no cache thread outlives `close()`.
+
+**Limit.** A storage call on a cache root that sits on an unresponsive network mount blocks inside the
+operating system, and `close()` waits for it.
 
 ### `PassThroughSecretCache`
 
@@ -327,10 +369,12 @@ The same four operations as `async def`, with `loader: AsyncGemLoader` and the s
 - `codec_id: ClassVar[CodecId]`.
 - `encode(self, values: list[Gem]) -> bytes`. Raises `TypeError` for a value it does not support.
 - `decode(self, data: bytes) -> list[Gem]`. Raises `CacheIntegrityError` for data it cannot decode.
-- Adapter `JsonGemCodec`. Each value becomes a typed node `{"t": <tag>, "v": <value>}`, keyed by
-  `CODEC_TYPE_KEY` and `CODEC_VALUE_KEY`. The tag is a `CODEC_*_TAG` constant: `"str"`, `"bytes"` (base64),
-  `"int"`, `"float"`, `"bool"`, `"null"`, `"list"`, or `"dict"` with string keys. The tags make the round trip
-  exact, with no type lost. An `IO` value raises `TypeError`.
+- Adapter `JsonGemCodec`, on the type-preserving encoding of `GAL-chooser`. `encode` returns
+  `canonical_json(values).encode("utf-8")`, and `decode` returns `from_typed(json.loads(data))`; a `ValueError`
+  from either call becomes `CacheIntegrityError`. Each value becomes a typed node keyed by `TYPED_TYPE_KEY` and
+  `TYPED_VALUE_KEY`, with a `TYPED_*_TAG` constant from `constants/config.py`, so the round trip is exact, with
+  no type lost. An `IO` value raises `TypeError`, and the values are returned without storing, as in step 6 of
+  `get_or_load`.
 
 ### `AbstractCacheStore`
 
@@ -437,8 +481,7 @@ A profile is a declared, supported combination. The contract suite runs on every
 
 - **`__init__(..., cache: AbstractSecretCache = PASS_THROUGH_CACHE)`,** a keyword-only parameter after
   `refresh` from `GAL-remember`. It stores `cache` and computes `self._routing_revision` as defined under
-  `CacheRequest`. It computes it again whenever `HiddenGems.preferences` changes, as it does when `dig_gem` sets
-  the saved choice after `save_preference` in step 5, and after `HiddenGems.invalidate` detects again.
+  `CacheRequest`.
 - **`dig_gem`** gains the keyword-only parameter `refresh: bool = False`, after `masked` from
   `GAL-masked-value`. The final signature is `dig_gem(self, name, *, provider=None, target=None, criteria=None,
   choice=None, remember=False, masked=False, refresh=False)`. Its body becomes:
@@ -447,10 +490,13 @@ A profile is a declared, supported combination. The contract suite runs on every
   3. `loader(deadline)` calls `self._resolve_within(name, provider=provider, target=target, criteria=criteria,
      choice=choice, deadline=deadline)` from `GAL-parallel`, then reads the reference by `deadline_capability` as
      `GAL-parallel`'s `dig_gem` does, all with the loader's `deadline`, giving `ResolvedGem(reference, values)`;
-  4. `values = self._cache.get_or_load(request, loader, deadline=deadline, refresh=refresh)`. `masked` is
-     applied to the values `get_or_load` returns;
+  4. `values = self._cache.get_or_load(request, loader, deadline=deadline, refresh=refresh)`. When building the
+     request in step 1 raised `TypeError`, `dig_gem` bypasses the cache instead: it runs `loader(deadline)`
+     directly, on the same deadline, takes its `values`, and stores nothing. `masked` is applied to the values
+     either path returns;
   5. with `remember=True` and a `choice`, `dig_gem` saves that choice through `save_preference` of `GAL-chooser`
-     after `get_or_load` returns, on a hit as on a miss. Neither `remember` nor `masked` is part of the request;
+     after step 4 returns, on a hit, a miss, or the bypass. Neither `remember` nor `masked` is part of the
+     request;
   6. the result is returned.
 
   The cache wait, the resolution, and the read share one deadline.
@@ -477,12 +523,12 @@ Every new name is in `src/hiddengems/secret_cache.py`, except the profile builde
 | Extension | Status | Implementation owner | Actual caller | Tests |
 | --- | --- | --- | --- | --- |
 | records and enums above | MUST ADD | `secret_cache.py` | `SecretCache`, `HiddenGems.dig_gem` | S2, S3, S5, S8 |
-| `AbstractSecretCache` | MUST ADD | `SecretCache`, `PassThroughSecretCache` | `HiddenGems.dig_gem` | S1-S10, S12-S16 |
-| `AbstractAsyncSecretCache` | MUST ADD | `AsyncSecretCache` | the library's caller | S11; async S1, S6-S10, S12, S13 |
-| `AbstractCacheCipher` | MUST ADD | `AesGcmCipher`, `ChaCha20Poly1305Cipher` | `SecretCache` | S1, S8, S13 |
+| `AbstractSecretCache` | MUST ADD | `SecretCache`, `PassThroughSecretCache` | `HiddenGems.dig_gem` | S1-S10, S12-S25 |
+| `AbstractAsyncSecretCache` | MUST ADD | `AsyncSecretCache` | the library's caller | async S1, S6-S13, S23-S25 |
+| `AbstractCacheCipher` | MUST ADD | `AesGcmCipher`, `ChaCha20Poly1305Cipher` | `SecretCache` | S1, S8, S13, S23 |
 | `AbstractGemCodec` | MUST ADD | `JsonGemCodec` | `SecretCache` | S1, S5 |
 | `AbstractCacheStore` | MUST ADD | `MemoryCacheStore`, `FileCacheStore` | `SecretCache` | S1, S7, S12 |
-| `AbstractCacheKeyStore` | MUST ADD | `MemoryCacheKeyStore`, `FileCacheKeyStore` | `SecretCache` | S1, S6, S13 |
+| `AbstractCacheKeyStore` | MUST ADD | `MemoryCacheKeyStore`, `FileCacheKeyStore` | `SecretCache` | S1, S6, S13, S23 |
 | `AbstractCacheLifetime` | MUST ADD | `FixedPeriodLifetime` | `SecretCache` | S1, S6 |
 | `AbstractCacheCoordinator` | MUST ADD | `ThreadCacheCoordinator`, `FileCacheCoordinator` | `SecretCache` | S1,S9,S10 |
 | profile builders | MUST ADD | `secret_cache_profiles.py` | the library's caller | S12, S16, S21 |
@@ -491,8 +537,8 @@ Every new name is in `src/hiddengems/secret_cache.py`, except the profile builde
 | `HiddenGems(cache=...)`, `dig_gem` | behavior change | `hidden_gems.py` | the library's caller | S2-S4, S14, S22 |
 | `hide_gem`, `invalidate` steps | behavior change | `hidden_gems.py` | the library's caller | S15, S20 |
 
-In the `AbstractAsyncSecretCache` row, "async S1, S6-S10, S12, S13" means that those cases run on the four
-`AsyncSecretCache` combinations.
+In the `AbstractAsyncSecretCache` row, "async S1, S6-S13, S23-S25" means that those cases run on the four
+`AsyncSecretCache` combinations; S11 runs only there.
 
 The signature and behavior of each are in the sections above.
 
@@ -560,7 +606,9 @@ Reused without a new class:
 - `TimeoutError`: from `get_or_load` it becomes `IncompleteGemLookupError` at `dig_gem`; from `invalidate`,
   `HiddenGems.invalidate` collects it and `hide_gem` lets it propagate after the write; from `expire` and
   `close`, it reaches their caller;
-- `TypeError` from `encode` means "do not store";
+- `TypeError` from `encode`, or from building the metadata, means "do not store";
+- `TypeError` from building the `CacheRequest` means "bypass the cache": `dig_gem` runs the loader directly
+  with the same deadline and stores nothing;
 - `ValueError` for a TTL out of range, or the disk profile on Windows;
 - `ModuleNotFoundError` when the `cache` extra is missing;
 - `asyncio.CancelledError` propagates unchanged.
@@ -589,21 +637,23 @@ payload and the authenticated metadata.
 - `AEAD_TAG_BYTES: Final[int] = 16`;
 - `NO_EPOCH_ID: Final[str] = ""` and `EPOCH_ORIGIN: Final[datetime] = datetime.min.replace(tzinfo=timezone.utc)`.
   `secret_cache.py` builds `NO_EPOCH` from them, as listed under [Records](#records);
-- `CODEC_TYPE_KEY: Final[str] = "t"` and `CODEC_VALUE_KEY: Final[str] = "v"`;
-- `CODEC_STR_TAG`, `CODEC_BYTES_TAG`, `CODEC_INT_TAG`, `CODEC_FLOAT_TAG`, `CODEC_BOOL_TAG`, `CODEC_NULL_TAG`,
-  `CODEC_LIST_TAG`, and `CODEC_DICT_TAG`, each `Final[str]`, with the values `"str"`, `"bytes"`, `"int"`,
-  `"float"`, `"bool"`, `"null"`, `"list"`, and `"dict"`;
 - `SELECTION_PROVIDER_KEY: Final[str] = "provider"`, `SELECTION_TARGET_KEY: Final[str] = "target"`,
   `SELECTION_CRITERIA_KEY: Final[str] = "criteria"`, `SELECTION_PREFERENCE_KEY: Final[str] = "preference"`, and
-  `SELECTION_CHOICE_KEY: Final[str] = "choice"`, the keys of `CacheRequest.selection`;
+  `SELECTION_CHOICE_KEY: Final[str] = "choice"`, the keys of `CacheRequest.selection`, which holds
+  `SELECTION_CHOICE_KEY` when `choice` is given and `SELECTION_PREFERENCE_KEY` when it is not;
 - `CACHE_RECORD_FORMAT: Final[int] = 1` and `CACHE_KEY_FORMAT: Final[int] = 1`;
 - `CACHE_MAX_RECORDS: Final[int] = 4096` and `CACHE_MAX_VALUE_BYTES: Final[int] = 1_048_576`;
 - `CACHE_HOLD_POLL_SECONDS: Final[float] = 0.01`;
+- `CACHE_ASYNC_WORKERS: Final[int] = 4` and `CACHE_THREAD_PREFIX: Final[str] = "hiddengems-cache"`, the worker
+  count and the thread-name prefix of the executor that `AsyncSecretCache` owns;
 - `CACHE_ISSUE_SOURCE: Final[str] = "secret-cache"`;
 - `CACHE_WAIT_TIMEOUT_REASON: Final[str] = "Waited for another read of the same gem until the time limit"`;
 - `CACHE_DISK_UNSUPPORTED: Final[str] = "The disk cache needs POSIX ownership and modes"`;
 - `SECRET_CACHE_WARNING: Final[str] = "Secret cache bypassed: {path} failed the {check} check"`;
 - `CACHE_EXTRA_MISSING: Final[str] = "Install hiddengems[cache] to use the secret cache"`.
+
+The codec's keys and tags are the `TYPED_*` constants of `GAL-chooser` in `constants/config.py`; this module
+declares none.
 
 ## Layout
 
@@ -622,8 +672,9 @@ payload and the authenticated metadata.
 
 - **Key placement,** the point the overview left open:
   - (a) `FileCacheKeyStore(root / "keys")`, beside the records, protected by file modes as `~/.ssh` is.
-    Recommended: a cache shared across processes needs a shared key, and destroying the key makes every record
-    unreadable at once, including copies in a backup.
+    Recommended: a cache shared across processes needs a shared key, and destroying the live key makes the live
+    records unreadable through the filesystem. A backup or snapshot that holds both a key file and its records
+    stays decryptable, so the claim covers only copies whose key copy is unavailable.
   - (b) `MemoryCacheKeyStore` only. Keys never touch the disk, so the disk profile is not offered; only the
     memory profile exists, and every process prompts once.
   - (c) a key held in an OS keystore item, such as the Keychain. A separate feature: reading that item can
@@ -638,9 +689,16 @@ payload and the authenticated metadata.
   - (a) `IncompleteGemLookupError` at `dig_gem`, as above. Recommended: callers already handle it, and the set
     of errors `dig_gem` raises does not grow.
   - (b) let `TimeoutError` reach the caller.
+- **A hit that overlaps `invalidate()`:**
+  - (a) a hit's linearization point is its check after decoding, and the linearization point of `invalidate` is
+    its `revoke` under the generation fence, as above. Recommended: hits for different identities run at the
+    same time, and a hit that passed its check returns even if `invalidate()` starts afterwards.
+  - (b) hits hold the generation fence, serializing them with `invalidate` and with each other. Not
+    recommended: one hit at a time.
 - **A refresh that fails:**
-  - (a) leave the existing record in place. Recommended: the store contract stays at the owner's three
-    operations, and the record was valid for the caller's period.
+  - (a) leave the existing record of that identity in place until the period ends, `invalidate()`, or a later
+    successful refresh. Recommended: the store contract stays at the owner's three operations, and the record
+    was valid for the caller's period.
   - (b) add `discard(identity, epoch)` to `AbstractCacheStore`, and drop the record before loading.
 - **A write through `hide_gem`:**
   - (a) invalidate the whole cache. Recommended: writes are rare, and the contract needs no operation to find
@@ -653,13 +711,13 @@ payload and the authenticated metadata.
 
 ## Acceptance cases
 
-The blocking gate is `tests/contract/test_secret_cache_contract.py`, in the contract-test location of `GAL-plugin`. S1,
-S6 to S10, S12, and S13 are parametrized over the eight profile combinations; S2 to S5 over the four `SecretCache`
-combinations, because `HiddenGems` takes an `AbstractSecretCache` and has no async API; and S11 over the four
-`AsyncSecretCache` combinations; a test, or part of one, that claims process sharing runs only on the disk profile. S14
-uses no cache. S15, S17 to S20, and S22 run on the memory profile with each cipher. S16 runs on the disk profile. S21
-calls the builders directly. Every test uses a controlled lifetime clock, a `tmp_path` root, and fake providers with
-fixture values, never a real secret or the real home directory.
+The blocking gate is `tests/contract/test_secret_cache_contract.py`, in the contract-test location of `GAL-plugin`.
+S1, S6 to S10, S12, S13, and S23 to S25 are parametrized over the eight profile combinations; S2 to S5 over the four
+`SecretCache` combinations, because `HiddenGems` takes an `AbstractSecretCache` and has no async API; and S11 over the
+four `AsyncSecretCache` combinations; a test, or part of one, that claims process sharing runs only on the disk
+profile. S14 uses no cache. S15, S17 to S20, and S22 run on the memory profile with each cipher. S16 runs on the disk
+profile. S21 calls the builders directly. Every test uses a controlled lifetime clock, a `tmp_path` root, and fake
+providers with fixture values, never a real secret or the real home directory.
 
 The owner's twelve cases:
 
@@ -669,7 +727,9 @@ The owner's twelve cases:
 - **S2** `test_hits_bypass_resolution_and_value_read`: with one successful fake provider and an unchanged
   request, 200 `dig_gem` calls produce one `find_gem` and one `get_gem`.
 - **S3** `test_request_identity_isolated`: the same gem name in different instances, locations, or selection
-  contexts never shares a result. Changing the effective preference changes the request and misses.
+  contexts never shares a result. Changing the effective preference of a request without `choice` changes the
+  request and misses. Criteria `{"path": Path("/x")}` and `{"path": "/x"}` give different identities. Criteria
+  holding an unsupported object bypass the cache: the loader runs on every call, and nothing is stored.
 - **S4** `test_unresolved_lookup_is_not_cached_as_success`: ambiguous, incomplete, and stale-preference
   results raise their existing errors every time and leave no record.
 - **S5** `test_codec_preserves_gem_contract`: strings, bytes, and nested lists and dicts round-trip without
@@ -690,7 +750,8 @@ The owner's twelve cases:
   failed or cancelled owner releases the hold, a waiter then loads, and late work publishes nothing.
 - **S11** `test_async_contract_does_not_block_loop`: an event-loop heartbeat keeps ticking during a slow loader
   and slow storage. Cancelling one waiter leaves the others and the owner running. `close()` leaves no task
-  or thread behind.
+  or thread behind: with a fake storage call that blocks for a bounded time, after `close()` no thread whose
+  name starts with `CACHE_THREAD_PREFIX` is alive.
 - **S12** `test_disk_profile_reopens_safely`: a new `SecretCache` on the same root hits before `d_e`, and
   misses after `d_e`. A truncated record or key file is a miss. Paths and modes match
   [Disk layout](#disk-layout), and a destroyed key's file is gone.
@@ -726,12 +787,21 @@ Added by this proposal:
   profile's store, key store, and coordinator; `disk_secret_cache` on a patched Windows platform raises `ValueError`
   with `CACHE_DISK_UNSUPPORTED`; a `ttl_seconds` outside `CACHE_MIN_PERIOD_SECONDS`..`CACHE_PERIOD_SECONDS` raises
   `ValueError`.
-- **S22** `test_remember_saves_the_choice_on_a_hit_and_a_miss`: with two candidates for `x` and a cache,
-  `dig_gem("x", choice=key, remember=True)` reads the provider once and calls `save_preference` with the
-  preference for `key`. That save changes `HiddenGems.preferences`, so the identical second call is a new
-  request: it misses, reads the provider once, and calls `save_preference` again. The identical third call is a
-  hit, makes no provider call, and calls `save_preference` again. Without `remember`, `save_preference` is not
-  called.
+- **S22** `test_remember_saves_the_choice_on_a_hit_and_a_miss`: with two candidates for `x` and a cache, the
+  first `dig_gem("x", choice=key, remember=True)` misses, reads the provider once, and calls `save_preference`
+  with the preference for `key`. The identical second call is a hit with no provider call, and calls
+  `save_preference` again with the same preference. `dig_gem("x")` without `choice` is a different request: it
+  resolves through the saved preference, and hits after its own first read. Without `remember`,
+  `save_preference` is not called.
+- **S23** `test_same_epoch_reuses_one_key_pair_across_identities`: two identities, including two concurrent
+  first misses, give one epoch and `key_id`, one seal key, and one index key. Every record uses that same key
+  pair, and the nonces of the records are distinct.
+- **S24** `test_hit_revalidates_after_wait_and_decode`: when the lifetime clock crosses `d_e` during decoding,
+  the request is a miss. When `invalidate()` runs while a request waits for its identity hold, the request
+  restarts from step 1 of `get_or_load` under the new epoch.
+- **S25** `test_hit_invalidation_linearization`: an `invalidate()` that starts after a hit's check in step 4
+  does not stop that hit, which returns its values; an `invalidate()` whose `revoke` runs before that check
+  makes the request a miss.
 
 ## Dependencies on other features
 
@@ -740,7 +810,8 @@ Added by this proposal:
   - `GAL-parallel`, for `Deadline` with its injected clock, `_resolve_within`, `deadline_capability`, and
     `get_gem_within`;
   - `GAL-remember`, for `HiddenGems.invalidate`;
-  - `GAL-chooser`, for `canonical_json.py`, `atomic_file.py`, `choice`, and `save_preference`;
+  - `GAL-chooser`, for `canonical_json.py` with its type-preserving encoding and the `TYPED_*` constants,
+    `atomic_file.py`, `choice`, and `save_preference`;
   - `GAL-masked-value`, for `masked`, the last `dig_gem` parameter before `refresh`;
   - `GAL-plugin`, for the `tests/contract/` location;
   - `GAL-settings`, for `LOOKUP_TIMEOUT_SECONDS`.
