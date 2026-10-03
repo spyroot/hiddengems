@@ -1,8 +1,22 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 6. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 7. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 7 answers review findings GPA5, GPA4, and GP17:
+
+- GPA5: the child runs two declared module-level operations, `child_find` and `child_get` in `child_runner.py`,
+  which build the instance with `GemProvider.create(record, types=(provider_type,))`. Outcomes cross the pipe as
+  plain data, because `ProviderLookupError` passes only its reason to `Exception`, so a pickled error object
+  cannot be rebuilt. Under dotenv option (b), the child runs `_dotenv_entry_present` and `_dotenv_entry_raw`,
+  which hold today's readability check and read; the file's device is read once, when the instance is created,
+  and never during a lookup.
+- GPA4: the deadline contract has two parts, return and execution. Under dotenv option (b) and non-cooperative
+  option (b), a killed child that the operating system still holds keeps only the return part: the call reports
+  it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and interpreter exit waits for it.
+  Both options state this weaker part for the owner.
+- GP17: `DEADLINE_CAPABILITY_INPUT_ERROR` names only the input's type, never its value.
 
 Revision 6 answers review findings GPA3 and GPA4. GPA3: under non-cooperative option (b), a value that pickle
 cannot send from the child, such as an IO stream, makes `_get_in_child` raise
@@ -65,12 +79,12 @@ Revision 2 added three things:
 
 A lookup checks its providers in parallel, never runs more calls at once than `LOOKUP_WORKERS`, and finishes
 within `LOOKUP_TIMEOUT_SECONDS` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every provider call it starts also stops
-within that bound, except, under option (a) of the [dotenv decision](#alternatives-for-the-owners-decision), the one
-known limit under Built-in deadline handling: the read of a declared dotenv file on an unresponsive mount, which the
-lookup waits for. Under option (b), a declared file whose device differs from the home directory's is read in a
-bounded child, and the lookup returns at the deadline plus grace. A provider that runs out of time becomes a
-`LookupIssue`, exactly like a provider that could not be checked today. The merged result does not depend on which
-call finishes first.
+within that bound, with the exceptions the [deadline contract](#names-signatures-errors-and-call-sites) names for
+the owner's [dotenv decision](#alternatives-for-the-owners-decision). Under option (a), the read of a declared
+dotenv file on an unresponsive mount is waited for. Under option (b), a declared file on a device other than the
+home directory's is read in a child, and the lookup returns within the bound; a killed child that the operating
+system still holds is reported, not waited for. A provider that runs out of time becomes a `LookupIssue`, exactly
+like a provider that could not be checked today. The merged result does not depend on which call finishes first.
 
 - **Today:** `HiddenGems.inspect_gem` calls `find_gem` on each record in turn (`hidden_gems.py:237-260`), with
   no overall deadline.
@@ -106,14 +120,16 @@ Out of scope:
 ```text
 ~ src/hiddengems/abstraction.py                  Deadline; Capability.DEADLINE
 ~ src/hiddengems/abstract_provider.py            DeadlineAwareGemProvider; deadline_capability
-+ src/hiddengems/child_runner.py                 run_in_child, under non-cooperative option (b) or dotenv option (b)
++ src/hiddengems/child_runner.py                 run_in_child, child_find, child_get, _child_main, ChildOutcome,
+                                                 under non-cooperative option (b) or dotenv option (b)
 ~ src/hiddengems/constants/capability.py         deadline reason constants; LEGACY_DEADLINE_WARNING
 ~ src/hiddengems/constants/lookup.py             the lookup constants below
 ~ src/hiddengems/hidden_gems.py                  _inspect_within, _resolve_within; one deadline per lookup;
                                                  bounded dig_gem read; _find_in_child, _get_in_child, which wrap
                                                  run_in_child, under non-cooperative option (b)
-~ src/hiddengems/gems/dotenv_provider.py         find_gem_within, get_gem_within; _read_dotenv_file; per the dotenv
-                                                 decision
+~ src/hiddengems/gems/dotenv_provider.py         find_gem_within, get_gem_within; under dotenv option (b):
+                                                 _dotenv_entry_present, _dotenv_entry_raw, _home_device, and the
+                                                 device stored at creation
 ~ src/hiddengems/gems/k8s_provider.py            find_gem_within, get_gem_within; bounded _read_secret_within
 ~ src/hiddengems/gems/kubernetes_constants.py    KUBE_READ_SLICE_SECONDS, KUBE_READ_CHUNK_BYTES
 ~ src/hiddengems/gems/onepassword_provider.py    find_gem_within, get_gem_within; CLI and SDK budgets
@@ -124,7 +140,7 @@ Out of scope:
 ~ src/hiddengems/gems/keychain_bridge.cpp        Keychain option (a)
 ~ src/hiddengems/gems/keychain_reader.cpp        Keychain option (a): query without interactive UI
 ~ tests/test_hidden_gems_routing.py              FakeProvider gains delay and cooperation; new cases
-~ tests/contract/example_providers.py            a provider that ignores deadlines
+~ tests/contract/example_providers.py            a provider that ignores deadlines; ChildExampleProvider
 ~ tests/contract/test_provider_contract.py       deadline contract cases
 ```
 
@@ -149,11 +165,20 @@ Out of scope:
     -> tuple[GemReference, ...]`;
   - `get_gem_within(self, reference: GemReference, *, deadline: Deadline) -> list[Gem]`.
 
-  Contract: the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
-  within `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every operation it starts, including a
-  process or a request, ends within that time. The one exception, under option (a) of the
-  [dotenv decision](#alternatives-for-the-owners-decision), is the read of a declared dotenv file on an unresponsive
-  mount, which the lookup waits for.
+  Contract, in two parts, each bounded by the deadline plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`:
+  - **Return:** the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
+    or with `CHILD_LINGERING_REASON`, within that time.
+  - **Execution:** every thread, request, and process the call starts has ended within that time.
+
+  The named exceptions, each tied to an owner's choice in the
+  [dotenv decision](#alternatives-for-the-owners-decision):
+  - under option (a), the read of a declared dotenv file on an unresponsive mount, which the call waits for, so
+    neither part holds for it;
+  - under option (b), a killed child that the operating system still holds in an uninterruptible wait, such as a
+    read from an unresponsive network mount. The return part holds, and the call reports the child with
+    `CHILD_LINGERING_REASON`; the execution part does not, and the child is reaped as `run_in_child` states. A
+    file on the home directory's own device is read in process: the home directory is taken as responsive, as
+    the walk guard of `GAL-expand` takes it.
 - **Built-ins:** each implements both methods, except `KeyringProvider` under Keychain option (b). Its existing
   `find_gem` and `get_gem` delegate to them with `Deadline.unbounded()`, so direct callers keep today's behavior,
   except `KeyringProvider` under Keychain option (a), whose native read never shows a prompt.
@@ -162,7 +187,9 @@ Out of scope:
   argument to `_run_cli`, and the `asyncio.wait_for` wrapper are added only for a finite deadline.
 - **New: `deadline_capability(provider_type: type) -> CapabilityObservation`,** with source
   `EvidenceSource.PROVIDER_CLASS`:
-  - an input that is not a class raises `TypeError(DEADLINE_CAPABILITY_INPUT_ERROR.format(value=...))`;
+  - an input that is not a class raises
+    `TypeError(DEADLINE_CAPABILITY_INPUT_ERROR.format(type_name=type(provider_type).__name__))`. The message
+    names the input's type and never its value or `repr`, under the overview's exception rule 4;
   - `SUPPORTED`, with `DEADLINE_SUPPORTED_REASON`, for a subclass of `DeadlineAwareGemProvider`;
   - `UNKNOWN`, with `DEADLINE_LEGACY_REASON`, for any other class on which `inspect.getattr_static` finds both a
     callable `find_gem_within` and a callable `get_gem_within` through the method resolution order;
@@ -245,11 +272,26 @@ Built-in deadline handling:
   file on an unresponsive network mount can block inside the operating system and cannot be bounded in a thread.
   The walk guard of `GAL-expand` keeps discovered and expanded files off mounts, but a plain path the user declares
   on a share is their choice. The owner's [dotenv decision](#alternatives-for-the-owners-decision) settles this
-  case: under option (a), the lookup waits for that read; under option (b), `DotEnvProvider.find_gem_within` and
-  `get_gem_within` read a declared file whose device differs from the home directory's through
-  `run_in_child(_read_dotenv_file, (path,), deadline)` under a finite deadline, and the lookup returns at the
-  deadline plus grace. `_read_dotenv_file(path: Path) -> dict[str, str]` is a module-level function of
-  `dotenv_provider.py`, so the child can import it by name.
+  case. Under option (a), every read stays in process, as today, and the lookup waits for that read. Under
+  option (b):
+  - `DotEnvProvider.__init__` stores `self._device: int | None`, the `st_dev` of one `os.stat(self.path)` made
+    when the factory creates the instance, or `None` when `self.path` is unset or the call raises `OSError`.
+    `_home_device() -> int | None`, a module-level function of `dotenv_provider.py` cached with
+    `functools.cache`, returns `os.stat(Path.home()).st_dev`, or `None` on `OSError`. For a file read in a child,
+    the parent makes no system call on the declared path during a lookup.
+  - Two module-level functions of `dotenv_provider.py` hold today's file access, so a child can import them by
+    name: `_dotenv_entry_present(path: Path, name: str) -> bool` and `_dotenv_entry_raw(path: Path, name: str)
+    -> str`. Each runs today's readability check of `_require_readable_dotfile` (`path.is_file()` and
+    `os.access(path, os.R_OK)`) and today's read (`dotenv_values(path, interpolate=False).get(name)`), and raises
+    today's `ProviderLookupError` reasons, including the translations of `OSError` and `UnicodeError`.
+    `_dotenv_entry_raw` raises today's entry-no-longer-available reason for a missing name.
+  - `find_gem_within` and `get_gem_within` first run today's checks that make no system call: `_check_criteria`,
+    the scan and access issues, and the checks of `_dotfile_for_reference` that come before its readability call.
+    They then call the two functions in process when the deadline is unbounded, or when `self._device` and
+    `_home_device()` are equal and not `None`. Otherwise they call
+    `run_in_child(_dotenv_entry_present, (self.path, name), deadline)` and
+    `run_in_child(_dotenv_entry_raw, (self.path, reference.name), deadline)`. Only a `bool` or one raw value
+    crosses the pipe; `parser_fn` runs in the parent, so no callable crosses it.
 
 ## Abstraction-extension gate
 
@@ -275,10 +317,10 @@ baseline is commit `4438234`.
   abstract methods `find_gem_within` and `get_gem_within` listed above. It defines no `__init__` and holds no
   state.
 - **Status:** optional base class. A provider that subclasses it MUST implement both methods.
-- **Behavior:** each call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON`, within
-  `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`, and every operation it starts ends within that
-  time, except, under option (a) of the [dotenv decision](#alternatives-for-the-owners-decision), the read of a
-  declared dotenv file on an unresponsive mount.
+- **Behavior:** the two-part contract listed under `src/hiddengems/abstract_provider.py` above, return and
+  execution, with its two named exceptions: under dotenv option (a), the read of a declared dotenv file on an
+  unresponsive mount; under dotenv option (b), a killed child that the operating system still holds, which keeps
+  only the return part and is reported with `CHILD_LINGERING_REASON`.
 - **Why it is not a parallel contract:** it subclasses `AbstractGemProvider` and adds two methods under new
   names. `find_gem` and `get_gem` stay the MUST members with their signatures unchanged, and a built-in's
   `find_gem` and `get_gem` delegate to the new methods with `Deadline.unbounded()`. A provider that does not
@@ -289,7 +331,8 @@ baseline is commit `4438234`.
 - **Actual caller:** `HiddenGems._inspect_within`, step 3, and the `HiddenGems.dig_gem` read.
 - **Acceptance tests:** `test_builtin_providers_stop_at_the_deadline`,
   `test_kubernetes_slow_steady_response_stops_at_the_deadline`,
-  `test_dotenv_read_on_another_device_runs_in_a_bounded_child` under dotenv option (b),
+  `test_dotenv_read_on_another_device_runs_in_a_bounded_child` and
+  `test_kernel_held_child_is_reported_apart_from_a_confirmed_exit` under dotenv option (b),
   `test_parallel_lookup_never_exceeds_lookup_workers`, and `test_parallel_merge_ignores_completion_order`.
 
 #### `deadline_capability` and `Capability.DEADLINE`
@@ -299,14 +342,16 @@ baseline is commit `4438234`.
 - **Status:** MUST ADD.
 - **Behavior:** the same rules and order as `write_capability` of `GAL-plugin`, with
   `DeadlineAwareGemProvider` in place of `WritableGemProvider` and both `find_gem_within` and `get_gem_within` in
-  place of `put_gem`: an input that is not a class raises `TypeError` with `DEADLINE_CAPABILITY_INPUT_ERROR`; the
-  subclass gives `SUPPORTED` with `DEADLINE_SUPPORTED_REASON`; a `find_gem_within` and a `get_gem_within` both
-  resolved through the method resolution order, on any other class, give `UNKNOWN` with `DEADLINE_LEGACY_REASON`;
+  place of `put_gem`: an input that is not a class raises `TypeError` with `DEADLINE_CAPABILITY_INPUT_ERROR`,
+  formatted with the input's type name only; the subclass gives `SUPPORTED` with `DEADLINE_SUPPORTED_REASON`; a
+  `find_gem_within` and a `get_gem_within` both resolved through the method resolution order, on any other class,
+  give `UNKNOWN` with `DEADLINE_LEGACY_REASON`;
   anything else gives `UNSUPPORTED` with `DEADLINE_UNSUPPORTED_REASON`. Source:
   `EvidenceSource.PROVIDER_CLASS`. Never `None`.
 - **Implementation owner:** `abstract_provider.py`, with the constants in `constants/capability.py`.
 - **Actual caller:** `HiddenGems._inspect_within`, step 3, and the `HiddenGems.dig_gem` read.
-- **Acceptance tests:** `test_deadline_capability_reports_each_state`.
+- **Acceptance tests:** `test_deadline_capability_reports_each_state` and
+  `test_deadline_capability_type_errors_do_not_expose_input_values`.
 
 #### `HiddenGems.inspect_gem` and `HiddenGems.dig_gem`
 
@@ -344,34 +389,85 @@ baseline is commit `4438234`.
   `test_namespace_only_preference_resolves_unique_cluster`, and
   `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`.
 
-#### `run_in_child`, `HiddenGems._find_in_child`, and `HiddenGems._get_in_child`
+#### `run_in_child`, `child_find`, `child_get`, `HiddenGems._find_in_child`, and `HiddenGems._get_in_child`
 
-- **Signature:** `run_in_child(target: Callable[..., T], args: tuple[Any, ...], deadline: Deadline) -> T`, in the
-  new module `src/hiddengems/child_runner.py`: it runs `target(*args)` in a child process and returns its
-  result over a pipe. `target` must be a module-level function that the child can import by name. The router's
-  wrappers are `_find_in_child(self, record: DetectedProvider, provider_type: type, name: str, criteria:
-  Mapping[str, Any] | None, deadline: Deadline) -> tuple[GemReference, ...]` and `_get_in_child(self, record:
-  DetectedProvider, provider_type: type, reference: GemReference, deadline: Deadline) -> list[Gem]`, private
-  methods of `HiddenGems`.
+- **Signature:** in the new module `src/hiddengems/child_runner.py`:
+  - `run_in_child(target: Callable[..., T], args: tuple[Any, ...], deadline: Deadline) -> T`: runs
+    `target(*args)` in a child process and returns its result. `target` must be a module-level function that the
+    child can import by name.
+  - `child_find(record: DetectedProvider, provider_type: type, name: str, criteria: Mapping[str, Any] | None)
+    -> tuple[GemReference, ...]`: builds the instance with `GemProvider.create(record, types=(provider_type,))`
+    from `GAL-discovery` and returns `tuple(instance.find_gem(name, criteria=criteria))`.
+  - `child_get(record: DetectedProvider, provider_type: type, reference: GemReference) -> list[Gem]`: builds the
+    instance the same way and returns `list(instance.get_gem(reference))`.
+  - `_child_main(sender: Connection, target: Callable[..., Any], args: tuple[Any, ...]) -> None`, the child's
+    entry point, and `ChildOutcome(StrEnum)` with the members `RESULT`, `NOT_APPLICABLE`, `LOOKUP_ERROR`,
+    `TRANSPORT`, and `ERROR`.
+
+  The router's wrappers are private methods of `HiddenGems`. `_find_in_child(self, record: DetectedProvider,
+  provider_type: type, name: str, criteria: Mapping[str, Any] | None, deadline: Deadline) ->
+  tuple[GemReference, ...]` returns `run_in_child(child_find, (record, provider_type, name, criteria), deadline)`.
+  `_get_in_child(self, record: DetectedProvider, provider_type: type, reference: GemReference, deadline: Deadline)
+  -> list[Gem]` returns `run_in_child(child_get, (record, provider_type, reference), deadline)`.
 - **Status:** MUST ADD under non-cooperative option (b) or dotenv option (b) only.
-- **Behavior:** `run_in_child` starts a child from `multiprocessing.get_context(CHILD_START_METHOD)`, and the two
-  wrappers call it. The child builds the
-  instance with `GemProvider.create(record, types=(provider_type,))` from `GAL-discovery`; the class crosses the
-  pipe by module and qualified name. At `deadline.remaining() + LOOKUP_SHUTDOWN_GRACE_SECONDS` the child is
-  terminated and joined, and `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` is raised. A class that
-  pickle cannot reference by name is handled as under option (a). `_get_in_child` sends the values over the pipe.
-  A value that pickle cannot send, an IO stream or any other unpicklable value, is never materialized: the child
-  sends nothing for it, and `_get_in_child` raises
-  `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`. This is the recommended option of the
-  [child read decision](#alternatives-for-the-owners-decision). Under dotenv option (b), `DotEnvProvider` calls
-  `run_in_child` itself for a declared file on another device; no router code branches on a provider.
-- **Implementation owner:** `child_runner.py` for `run_in_child`; `hidden_gems.py` for the two wrappers.
+- **Behavior of `run_in_child`,** in order:
+  1. Call `multiprocessing.active_children()`, which reaps every child of this process that has exited,
+     including a held child of an earlier call.
+  2. With `context = multiprocessing.get_context(CHILD_START_METHOD)`, open
+     `receiver, sender = context.Pipe(duplex=False)`, start
+     `context.Process(target=_child_main, args=(sender, target, args))`, and close the parent's `sender`. When
+     `start` raises `pickle.PicklingError`, `AttributeError`, or `TypeError`, `target` or a class in `args` cannot
+     be referenced by name: no child runs, and `run_in_child` raises
+     `ProviderLookupError(NO_DEADLINE_REASON, NO_DEADLINE_NEXT_ACTION)`, as under non-cooperative option (a).
+  3. Wait for the outcome until the deadline with `receiver.poll(deadline.remaining())`, then read it with
+     `pickle.loads(receiver.recv_bytes())`. An unbounded deadline waits without a limit. `EOFError` from
+     `recv_bytes` means that the child exited without an outcome.
+  4. If no outcome arrived, kill the child (`Process.kill`, `SIGKILL` on POSIX). Then call
+     `process.join(LOOKUP_SHUTDOWN_GRACE_SECONDS)`, kill the child if it is still alive, and close `receiver`. The
+     call therefore returns within the deadline plus the grace.
+  5. Return or raise, from what the parent has:
+
+  | Outcome | Result |
+  | --- | --- |
+  | `(RESULT, value)` | returns `value` |
+  | `(NOT_APPLICABLE,)` | raises `ProviderNotApplicable()` |
+  | `(LOOKUP_ERROR, reason, next_action, matches)` | raises `ProviderLookupError(reason, next_action, matches)` |
+  | `(TRANSPORT,)` | raises `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)` |
+  | `(ERROR, error_type)` | raises `RuntimeError(CHILD_ERROR_MESSAGE.format(error_type=error_type))` |
+  | none, `EOFError` | raises `RuntimeError(CHILD_EXIT_MESSAGE.format(exitcode=process.exitcode))` |
+  | none, `exitcode` set | raises `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` |
+  | none, `exitcode` is `None` | raises `ProviderLookupError(CHILD_LINGERING_REASON, CHILD_LINGERING_NEXT_ACTION)` |
+
+  With `exitcode` set, the child's exit is confirmed. An outcome that arrived stands, even if its child was still
+  alive after step 4.
+- **Behavior of `_child_main`,** in the child. It calls `target(*args)` and pickles one outcome:
+  - a return gives `(RESULT, value)`;
+  - `ProviderNotApplicable` gives `(NOT_APPLICABLE,)`;
+  - `ProviderLookupError` gives `(LOOKUP_ERROR, error.reason, error.next_action, error.matches)`;
+  - any other `Exception` gives `(ERROR, f"{type(error).__module__}.{type(error).__qualname__}")`: the class name,
+    never the message, which may hold a value.
+
+  When pickling a `RESULT` or `LOOKUP_ERROR` outcome fails, the child pickles `(TRANSPORT,)` instead, so a value
+  that pickle cannot send, an IO stream or any other, is never materialized in the parent. This is the recommended
+  option of the [child read decision](#alternatives-for-the-owners-decision). The child sends the bytes with
+  `sender.send_bytes` and ends with `os._exit(0)`, so no thread that the provider started keeps it alive.
+- **A held child:** a killed child whose `exitcode` is still `None` after step 4 is held by the operating system in
+  an uninterruptible wait. It stays in the set of children that the parent's `multiprocessing` module keeps, and
+  step 1 of a later call reaps it once it has exited. At interpreter exit, `multiprocessing` joins every child it
+  still holds, with no time limit, so a held child delays the parent's exit until the operating system releases
+  it. This is the weaker part that non-cooperative option (b) and dotenv option (b) state for the owner.
+- **No provider branch:** under dotenv option (b), `DotEnvProvider` calls `run_in_child` itself for a declared file
+  on another device; no router code branches on a provider.
+- **Implementation owner:** `child_runner.py` for `run_in_child`, `child_find`, `child_get`, `_child_main`, and
+  `ChildOutcome`; `hidden_gems.py` for the two wrappers; `dotenv_provider.py` for its two file functions.
 - **Actual caller:** `HiddenGems._inspect_within`, step 3, calls `_find_in_child`, and the `HiddenGems.dig_gem`
   read calls `_get_in_child`, both for an `UNSUPPORTED` provider; under dotenv option (b),
   `DotEnvProvider.find_gem_within` and `get_gem_within` call `run_in_child` for a declared file on another
   device.
-- **Acceptance tests:** `test_non_cooperative_provider_never_runs_unbounded` and
-  `test_child_read_reports_declared_transport_rejection`.
+- **Acceptance tests:** `test_non_cooperative_provider_never_runs_unbounded`,
+  `test_child_read_reports_declared_transport_rejection`,
+  `test_spawn_child_find_and_get_use_declared_importable_targets`, and
+  `test_kernel_held_child_is_reported_apart_from_a_confirmed_exit`.
 
 #### Keychain interaction-not-allowed status
 
@@ -402,7 +498,7 @@ proposal. `B` loses no member and changes no signature. The factory is unchanged
 | --- | --- | --- |
 | `OnePasswordProvider` | `SUPPORTED` | CLI timeout kills `op`; SDK under `wait_for` |
 | `DotEnvProvider`, dotenv option (a) | `SUPPORTED` | checks the deadline; waits on an unresponsive mount |
-| `DotEnvProvider`, dotenv option (b) | `SUPPORTED` | checks the deadline; reads a file on another device in a child |
+| `DotEnvProvider`, dotenv option (b) | `SUPPORTED` | reads a file on another device in a child; reports a held child |
 | `KeyringProvider`, Keychain option (a) | `SUPPORTED` | a non-interactive query |
 | `KeyringProvider`, Keychain option (b) | `UNSUPPORTED` | the non-cooperative path |
 | `KubernetesProvider` | `SUPPORTED` | `_read_secret_within`: sliced timeouts and a chunked body read |
@@ -468,7 +564,19 @@ No new class. Each situation reuses an existing one, under the overview's except
 - **A value that cannot cross the child-process boundary**, under non-cooperative option (b), makes
   `_get_in_child` raise `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`; the child sends
   nothing for it. This is the recommended option of the child read decision.
-- **`deadline_capability` with an input that is not a class** raises `TypeError`, as `write_capability` does.
+- **A killed child that the operating system still holds** makes `run_in_child` raise
+  `ProviderLookupError(CHILD_LINGERING_REASON, CHILD_LINGERING_NEXT_ACTION)`: the instance could not be checked,
+  and the reason tells the held child apart from a confirmed timeout.
+- **`ProviderNotApplicable` and `ProviderLookupError` raised in the child** cross the pipe as plain data and are
+  raised again in the parent with the same reason, next action, and matches, so `_inspect_within` handles them as
+  in process. No exception object is pickled: `ProviderLookupError` passes only its reason to `Exception`, so a
+  pickled one cannot be rebuilt.
+- **Any other exception in the child** becomes `RuntimeError(CHILD_ERROR_MESSAGE)` in the parent, naming only its
+  class, and a child that exits without an outcome becomes `RuntimeError(CHILD_EXIT_MESSAGE)` with its exit code.
+  `RuntimeError` is reused because such an exception propagates from today's loop too. Its message may hold a
+  value, and its class may not be importable in the parent, so neither crosses the pipe.
+- **`deadline_capability` with an input that is not a class** raises `TypeError`, as `write_capability` does,
+  with a message that names only the input's type.
 - **The 1Password CLI's `subprocess.TimeoutExpired`** is translated to `ProviderLookupError`, as
   `onepassword_provider.py` already does today.
 - **Warning reused: `DeprecationWarning`** with `LEGACY_DEADLINE_WARNING`, for an `UNKNOWN` provider: a one-time
@@ -494,6 +602,12 @@ In `src/hiddengems/constants/lookup.py`, beside the constants the overview alrea
 - `CHILD_TRANSPORT_REASON: Final[str] = "The value cannot cross the child-process boundary"` and
   `CHILD_TRANSPORT_NEXT_ACTION: Final[str] = "Ask the provider's author to subclass DeadlineAwareGemProvider"`,
   used under non-cooperative option (b) for a value that pickle cannot send, per the child read decision.
+- `CHILD_LINGERING_REASON: Final[str] = "The provider's child process was killed, but the operating system still
+  holds it"` and `CHILD_LINGERING_NEXT_ACTION: Final[str] = "Check the device or mount the provider reads, then
+  retry"`, used by `run_in_child` for a killed child whose exit is not confirmed.
+- `CHILD_ERROR_MESSAGE: Final[str] = "The provider raised {error_type} in its child process"` and
+  `CHILD_EXIT_MESSAGE: Final[str] = "The provider's child process exited with code {exitcode} before sending a
+  result"`, the `RuntimeError` messages of `run_in_child`.
 
 In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants. Under
 `GAL-plugin` option one, which adds no write constants, this feature creates the module:
@@ -503,7 +617,8 @@ In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside 
   DeadlineAwareGemProvider"`.
 - `DEADLINE_UNSUPPORTED_REASON: Final[str] = "Does not subclass DeadlineAwareGemProvider and resolves no deadline
   methods"`.
-- `DEADLINE_CAPABILITY_INPUT_ERROR: Final[str] = "deadline_capability needs a class, not {value!r}"`.
+- `DEADLINE_CAPABILITY_INPUT_ERROR: Final[str] = "deadline_capability needs a class, not an instance of
+  {type_name}"`.
 - `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without subclassing
   DeadlineAwareGemProvider; subclass it to keep parallel lookup"`.
 
@@ -538,7 +653,9 @@ standard library.
 ## Behavior and compatibility
 
 - **Lookups run in parallel and are bounded,** except, under dotenv option (a), the read of a declared file on an
-  unresponsive mount. Behavior change: a lookup that hangs today now ends with an Incomplete result naming the
+  unresponsive mount. Under dotenv option (b) and non-cooperative option (b), a killed child that the operating
+  system still holds is reported with `CHILD_LINGERING_REASON` instead of waited for, and interpreter exit waits
+  for it. Behavior change: a lookup that hangs today now ends with an Incomplete result naming the
   provider that ran out of time.
 - **The result is unchanged in shape and order.** `LookupResult` is the same, and matches stay in record order.
 - **`AbstractGemProvider` gains no required member.** `DeadlineAwareGemProvider` is an additional interface, and
@@ -564,12 +681,14 @@ A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
   `NO_DEADLINE_REASON` and `NO_DEADLINE_NEXT_ACTION`. Simple and bounded, but a provider registered by replacing
   `GemProvider.provider_types` stops being checked until its author adopts the interface.
 - **(b) Run it in a child process** started with `CHILD_START_METHOD`, through `HiddenGems._find_in_child` and
-  `HiddenGems._get_in_child`. The child is terminated when the deadline plus grace passes. The child builds the
-  instance with `GemProvider.create(record, types=(provider_type,))` from `GAL-discovery`; the class crosses the
-  pipe by module and qualified name; a class that pickle cannot reference by name is handled as under option (a).
-  Bounded and compatible, at the cost of a process per call, and values for `dig_gem` crossing a local pipe
-  between the user's own processes; a value that pickle cannot send is handled per the child read decision below.
-  Recommended: it keeps every registered provider usable.
+  `HiddenGems._get_in_child`, which run `child_find` and `child_get` as `run_in_child` states. The child is killed
+  at the deadline and builds the instance with `GemProvider.create(record, types=(provider_type,))` from
+  `GAL-discovery`; the class crosses the pipe by module and qualified name; a class that pickle cannot reference by
+  name is handled as under option (a). The call returns within the deadline plus grace. The weaker part: a killed
+  child that the operating system still holds is reported with `CHILD_LINGERING_REASON`, reaped once it exits,
+  and waited for at interpreter exit. Compatible, at the cost of a process per call, and values for `dig_gem`
+  crossing a local pipe between the user's own processes; a value that pickle cannot send is handled per the child
+  read decision below. Recommended: it keeps every registered provider usable.
 - A third option, running it without a bound, fails the gate, so it is not offered.
 
 A child read, under non-cooperative option (b), of a value that cannot cross the pipe, such as an IO stream.
@@ -597,13 +716,17 @@ The Keychain, whose query can wait on an authorization prompt:
 The read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread:
 
 - **(a) Accept a weaker contract for that named case.** `SUPPORTED` means bounded, except a read of a declared
-  file on an unresponsive mount, which the lookup waits for.
-- **(b) Read a file on another device in a bounded child.** A declared dotenv file whose device differs from the
-  home directory's (`os.stat(path).st_dev != os.stat(Path.home()).st_dev`) is read through the child runner of
-  non-cooperative option (b) under a finite deadline, so the lookup returns at the deadline plus grace. A child
-  blocked inside the kernel is terminated, and reaped when the operating system releases it. `SUPPORTED` then
-  means bounded, with no exception. Recommended: it keeps the owner's gate, with no provider execution unbounded
-  after timeout.
+  file on an unresponsive mount, which the lookup waits for. Neither the return part nor the execution part of the
+  contract holds for that read.
+- **(b) Read a file on another device in a bounded child.** A declared dotenv file whose device, stored when the
+  instance is created, differs from the home directory's is checked and read through `run_in_child` under a
+  finite deadline, as Built-in deadline handling states. The parent makes no system call on that path during a
+  lookup. The return part of the contract always holds: the lookup returns within the deadline plus grace. The
+  execution part holds except for a killed child that the operating system still holds in an uninterruptible
+  wait: the lookup reports it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and
+  interpreter exit waits for it. A file on the home directory's own device is read in process, so the home
+  directory is taken as responsive. Recommended: no lookup waits on an unresponsive mount, and a held child is
+  reported rather than hidden.
 
 ## Acceptance cases
 
@@ -648,13 +771,42 @@ In `tests/test_hidden_gems_routing.py`:
     blocks until released.
   - Expected under option (a): it is never called; its `LookupIssue` carries `NO_DEADLINE_REASON`.
   - Expected under option (b): its child process has ended (`exitcode` is set) when `inspect_gem` returns, within
-    0.2 seconds plus the grace.
+    0.2 seconds plus the grace, and its `LookupIssue` carries `TIMEOUT_REASON`, not `CHILD_LINGERING_REASON`: a
+    child that can be killed gives a confirmed exit.
   - Under either option, no lookup thread is left alive.
 - `test_child_read_reports_declared_transport_rejection`, under non-cooperative option (b) and child read
   option (a).
   - Input: an `UNSUPPORTED` provider whose `get_gem` returns an open stream.
   - Expected: `_get_in_child` raises `ProviderLookupError` with `CHILD_TRANSPORT_REASON`, and the child process has
     ended.
+- `test_spawn_child_find_and_get_use_declared_importable_targets`, under non-cooperative option (b).
+  - Input: `ChildExampleProvider` from `tests/contract/example_providers.py`, an `UNSUPPORTED` provider whose
+    class attributes name four gems: one it finds and reads; one for which it raises `ProviderNotApplicable`; one
+    for which it raises `ProviderLookupError` with its own reason, next action, and one match; and one for which
+    it raises `LookupError` carrying a token. The token comes from `secrets.token_hex()` at run time and reaches
+    the child in the record's settings. A spy wraps `run_in_child`, records its `target` and `args`, and calls the
+    real function.
+  - Expected:
+    - `_find_in_child` passes `child_find` with `(record, provider_type, name, criteria)`, and `_get_in_child`
+      passes `child_get` with `(record, provider_type, reference)`; each target is the attribute of
+      `hiddengems.child_runner` named by its `__name__`;
+    - the child's references and values equal those of an instance built in process by
+      `GemProvider.create(record, types=(provider_type,))`;
+    - `ProviderNotApplicable` arrives as `ProviderNotApplicable`, so the record is skipped as in process; the
+      `ProviderLookupError` arrives with the same reason, next action, and match; the `LookupError` arrives as
+      `RuntimeError` whose message is `CHILD_ERROR_MESSAGE` naming `builtins.LookupError`, without the token;
+    - every child has exited (`exitcode` is set) when its call returns.
+- `test_kernel_held_child_is_reported_apart_from_a_confirmed_exit`, under non-cooperative option (b) or dotenv
+  option (b).
+  - Input: `run_in_child` with `multiprocessing.get_context` patched to a fake context. Its `Process` records
+    `start` and `kill`; its `join(timeout)` returns at once; its `exitcode` stays `None` and `is_alive()` stays
+    true while the test holds it. Its `Pipe` gives a receiving end whose `poll` returns false. A spy wraps
+    `multiprocessing.active_children`.
+  - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_LINGERING_REASON` within 0.2 seconds plus
+    the grace; `kill` was called; `exitcode` is still `None` when the call returns, so the return is not taken as a
+    confirmed exit; a second `run_in_child` call calls `multiprocessing.active_children()` before it starts its
+    child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
+    `TIMEOUT_REASON` and a set `exitcode`.
 - `test_lookup_with_no_records_skips_the_pool`.
   - Input: `HiddenGems(providers=(), config_path=tmp_path / "missing.json")`.
   - Expected: `dig_gem` raises `GemNotFoundError`, as today, and no thread whose name starts with
@@ -667,6 +819,11 @@ In `tests/contract/test_provider_contract.py`:
     `get_gem_within` without the base.
   - Expected: `SUPPORTED`, `UNSUPPORTED`, and `UNKNOWN` respectively, each with source `PROVIDER_CLASS`, never
     `None`. Under Keychain option (b), `KeyringProvider` gives `UNSUPPORTED`.
+- `test_deadline_capability_type_errors_do_not_expose_input_values`.
+  - Input: a fake token from `secrets.token_hex()` made at run time, and an instance of a test class whose
+    `__repr__` and `__str__` return that token.
+  - Expected: each raises `TypeError` whose message is `DEADLINE_CAPABILITY_INPUT_ERROR` formatted with the
+    input's type name; the token appears in none of `str(error)`, `repr(error)`, and the items of `error.args`.
 - `test_onepassword_sdk_work_ends_at_the_deadline`, skipped when the SDK is not installed.
   - Input: the real SDK client patched to a coroutine that awaits a native call which never returns.
   - Expected: the call ends within the bound, and no SDK task or thread is alive afterwards.
@@ -686,9 +843,13 @@ In `tests/contract/test_provider_contract.py`:
   - Input: a fake response whose `read1` returns one byte every 0.05 seconds for 10 seconds.
   - Expected: the call ends within the deadline plus one slice.
 - `test_dotenv_read_on_another_device_runs_in_a_bounded_child`, under dotenv option (b).
-  - Input: a declared dotenv file with a patched `st_dev` that differs from the home directory's, and a fake read
-    that blocks.
-  - Expected: the lookup returns within the bound.
+  - Input, first case: a declared dotenv file in `tmp_path` whose stored `_device` is patched to differ from
+    `_home_device()`, with `dotenv_provider._dotenv_entry_present` patched to a module-level function of the test
+    module that blocks until killed. Second case: the same file with `_device` equal to `_home_device()`, and
+    nothing else patched.
+  - Expected: in the first case, `find_gem_within` raises `ProviderLookupError` with `TIMEOUT_REASON` within the
+    bound, and the child has exited; in the second, `run_in_child` is never called and the result equals that of
+    `find_gem`. In the first case, the parent makes no system call on the declared path during the lookup.
 
 ## Dependencies on other features
 
