@@ -265,7 +265,7 @@ Status values:
 | `GAL-plugin` | `put_gem` moves to `WritableGemProvider` | none | Declared |
 | `GAL-expand` | classmethod `expand()`, not abstract | `expand()` | Declared |
 | `GAL-parallel` | subclass `DeadlineAwareGemProvider` | none | Declared |
-| `GAL-remember` | `invalidate`, `revalidate`, `environment_names`; `CachingGemProvider` | `revalidate()` | Declared |
+| `GAL-remember` | 3 members with defaults; `CachingGemProvider` | `revalidate`, `detection_environment` | Declared |
 | `GAL-settings` | `settings_type()` | none | Locked |
 | `GAL-selector` | `selector_type()` | none | Locked |
 | `GAL-sdk-optional` | `supported_os()`, `required_modules()` | `classify()` | Locked |
@@ -337,7 +337,7 @@ New classes proposed so far:
 
 Decided reuse, with no new class: a lookup timeout is `ProviderLookupError` with `TIMEOUT_REASON` (`GAL-parallel`);
 a plain directory path or a home-rooted tree is `ValueError` (`GAL-expand`); several failed invalidation steps
-are one built-in `ExceptionGroup` (`GAL-remember`); `write_capability` with a non-provider input is `TypeError`
+are one built-in `ExceptionGroup` (`GAL-remember`); `write_capability` with a non-class input is `TypeError`
 (`GAL-plugin`); a uniform read error would be `ProviderLookupError` (proposed `GAL-read-errors`).
 
 ## Feature index
@@ -927,7 +927,9 @@ to `AbstractGemProvider` and the factory are also listed in the [Register](#regi
   encrypted between calls.** Relaxation of the non-goal
   "no caching of gem values": a value would outlive the call that read it. Why: without it, every request to
   the same gem can prompt for authentication again. Where the per-period key lives, and what one
-  authentication unlocks, must be settled before this can be approved.
+  authentication unlocks, must be settled before this can be approved. A second relaxation, opt-in like the
+  first: within a cache period, the caller's earlier choice outlives a duplicate that appears later in another
+  provider. `dig_gem` gains `refresh: bool = False`, and `refresh=True` resolves again at once.
 - **`GAL-sdk-optional`: `kubernetes` SDK moves to an extra** (`hiddengems[kubernetes]`). Packaging contract change.
   A plain install no longer pulls the SDK. Open question `GAL-kube-extra`.
 
@@ -1184,7 +1186,7 @@ Status: locked.
 
 ### GAL-plugin
 
-Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 6. `put_gem` moves to `WritableGemProvider`, the
+Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 7. `put_gem` moves to `WritableGemProvider`, the
 read-only providers lose their stubs, and `hide_gem` raises `ProviderNotWritableError` before any call to a
 read-only provider. The hooks and shared types of revision 1 moved to the features that call them; that file's
 Scope lists where each one went.
@@ -1411,7 +1413,7 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 2. It replaces the earlier entry here, which
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 3. It replaces the earlier entry here, which
 bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
 `cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline`,
 a timeout becomes a `LookupIssue`, matches merge in record order, and shutdown waits only for calls that are
@@ -1460,7 +1462,7 @@ themselves bounded.
 
 ### GAL-remember
 
-Specified in [GAL-remember.md](gal/GAL-remember.md), revision 2. `AbstractGemProvider` gains `invalidate()`,
+Specified in [GAL-remember.md](gal/GAL-remember.md), revision 3. `AbstractGemProvider` gains `invalidate()`,
 a no-op by default, and `CachingGemProvider` implements the cache lifecycle once for providers that keep
 state. `HiddenGems.invalidate()` calls the declared hook on every instance. Detection is remembered in the
 config file and reused only while its fingerprint is current and every record revalidates.
