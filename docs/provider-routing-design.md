@@ -94,6 +94,34 @@ Consumption stays easy across the range of users:
   (`GAL-targets`, `GAL-kube-contexts`), remembered detection (`GAL-remember`), and parallel lookup
   (`GAL-parallel`).
 
+### Unknown is a value
+
+A state the library cannot establish is reported as UNKNOWN, together with the `EvidenceSource` it rests on and
+a next action. It is never reported as `None`, and never as absence. `None` appears only as "not given" for an
+optional argument.
+
+- **An empty result means one thing only:** no provider was detected at all, `A(o) = ∅`
+  (`GAL-case-no-provider`). Every other result lists something: a found location, an UNKNOWN instance, or a
+  declared target reported as ABSENT.
+- **Example.** The 1Password desktop app is present, but neither its CLI nor its SDK is enabled, so `x` may or
+  may not be there. The library reports that instance as detected, and `x` there as UNKNOWN, with the next
+  action "install or enable the 1Password CLI or SDK, then re-run".
+- **The caller decides what to do with it.** If `x` is also found in another provider, the result is Incomplete
+  and carries both: the found `x` and the UNKNOWN 1Password instance. A caller that uses the found `x`
+  (`choice=`) accepts that 1Password does not matter for this call. That choice is the caller's, not the
+  library's.
+- **Today this case is silent.** `OnePasswordProvider.detect` returns nothing when it finds neither the CLI nor
+  the SDK (`onepassword_provider.py:234-235`), so 1Password counts as absent and nothing is reported. The fix
+  is the proposed feature `GAL-onepassword-unknown` in the [Decision register](#9-decision-register).
+- **Capabilities follow the same rule.** What a target supports is reported as SUPPORTED, UNSUPPORTED, or
+  UNKNOWN, with the `EvidenceSource` it rests on. The next revision of `GAL-plugin` applies this to the write
+  capability.
+- **Names that still use `None` for a state** are replaced in their own revisions:
+  `ProviderObservation.state` (`GAL-sdk-optional`), `GemProvider.classify` (`GAL-sdk-optional`),
+  `settings_type()` (`GAL-settings`), `selector_type()` (`GAL-selector`), `LookupResult.resolution`
+  (`GAL-scope`), `HiddenGems._route_for` (`GAL-routing`), `terminal_chooser` (`GAL-chooser`), and
+  `load_remembered` (`GAL-remember`).
+
 ### Cases
 
 Each case names the row of the [resolution table](#45-router-and-resolution) it lands on.
@@ -109,6 +137,8 @@ Required cases:
 | `GAL-user-advanced` | Five clusters in five kubeconfig files | A declared scope, then Preferred or Tie |
 | `GAL-hidden-unqueried` | Two clusters; `R(x) = {c₁}`; `Unchecked(x) = {c₂}` | Incomplete |
 | `GAL-hidden-undetected` | `x` lies only in `Undetected` | No row sees it; the caller declares it |
+| `GAL-case-onepassword-unknown` | 1Password app, no CLI or SDK; `R(x) = {dotenv}` | Incomplete; caller decides |
+| `GAL-case-no-provider` | No provider detected at all: `A(o) = ∅` | Not found, with the only empty result |
 | `GAL-case-repeated-reads` | `R(x) = {i}`; 200 tests read `x` in one run | Single; one prompt is the open target |
 
 Additional cases:
@@ -135,6 +165,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-discovery` | Entry-point provider loading with a config allowlist | [Registry](#43-registry-and-loading) |
 | `GAL-sdk-optional` | Missing provider SDK reported as `Unsupported`, not an import error | [Registry](#43-registry-and-loading) |
 | `GAL-targets` | Named targets in config v2, with v1 migration and JSON Schema | [Configuration](#44-configuration-v2) |
+| `GAL-expand` | A declared directory expands into one target per file, within bounds | [GAL-expand.md](gal/GAL-expand.md) |
 | `GAL-scope` | Explicit preference order; a stale preference never widens | [Router](#45-router-and-resolution) |
 | `GAL-routing` | Pattern routes from gem names to targets | [Configuration](#44-configuration-v2) |
 | `GAL-local-off` | `discovery.local` switch for implicit discovery | [Configuration](#44-configuration-v2) |
@@ -195,7 +226,7 @@ Nothing is rewritten wholesale.
   src/hiddengems/
     __init__.py
 +   __main__.py                              GAL-cli-detect
-~   abstract_provider.py                     GAL-plugin
+~   abstract_provider.py                     GAL-plugin, GAL-expand
     abstract_provier.py                      removal is a separate decision in GAL-plugin
 ~   abstraction.py                           GAL-settings, GAL-sdk-optional,
                                              GAL-scope, GAL-chooser, GAL-explain, GAL-verify
@@ -210,7 +241,7 @@ Nothing is rewritten wholesale.
 +   constants/platform.py                    GAL-sdk-optional
 +   detection_cache.py                       GAL-remember
 ~   gem_provider.py                          GAL-discovery, GAL-sdk-optional
-~   hidden_gems.py                           GAL-plugin, GAL-settings, GAL-selector, GAL-targets, GAL-local-off,
+~   hidden_gems.py                           GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-targets, GAL-local-off,
                                              GAL-scope, GAL-routing, GAL-chooser, GAL-explain,
                                              GAL-write-target, GAL-parallel, GAL-remember, GAL-verify,
                                              GAL-masked-value
@@ -219,8 +250,8 @@ Nothing is rewritten wholesale.
     gems/
       __init__.py
 +     dotenv_constants.py                    GAL-settings
-~     dotenv_provider.py                     GAL-plugin, GAL-settings, GAL-selector, GAL-local-off
-~     k8s_provider.py                        GAL-plugin, GAL-settings, GAL-selector, GAL-sdk-optional,
+~     dotenv_provider.py                     GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-local-off
+~     k8s_provider.py                        GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-sdk-optional,
                                              GAL-local-off, GAL-kube-contexts, GAL-parallel
       keychain_bridge.cpp                changed only by a proposed Keychain feature
       keychain_bridge.h                  changed only by a proposed Keychain feature
@@ -240,6 +271,7 @@ Nothing is rewritten wholesale.
 +   frozen_docs.bats                         GAL-readme-frozen
 +   test_hidden_gems_cli.py                  GAL-cli-detect
 +   test_hidden_gems_config.py               GAL-targets
++   test_hidden_gems_expand.py               GAL-expand
 ~   test_hidden_gems_dotenv.py               named in each feature's entry
 ~   test_hidden_gems_keyring.py              named in each feature's entry
 ~   test_hidden_gems_package.py              GAL-discovery, GAL-sdk-optional
@@ -553,6 +585,10 @@ as `software-design.md` requires. An earlier version of this section put every c
 - `CONFIG_FILE_MODE: Final[int] = 0o600`: the mode used when the library writes the file (`GAL-chooser`).
 - `ENTRY_POINT_GROUP: Final[str] = "hiddengems.providers"` and
   `BUILTIN_DISTRIBUTION: Final[str] = "hiddengems"` (`GAL-discovery`).
+- `UNBOUNDED_DEPTH: Final[float] = math.inf` and `UNBOUNDED_DEPTH_WORD: Final[str] = "unbounded"`; the
+  setting `"unbounded"` maps to `math.inf`, never to `None` (`GAL-expand`).
+- `TARGET_NAME_SEPARATOR: Final[str] = "/"` and
+  `EXPANDED_EVIDENCE_DESCRIPTION: Final[str] = "Found by expanding declared target {target}"` (`GAL-expand`).
 - `DISCOVERY_LOCAL_OPTION: Final[str] = "include_local"`: the detection option the router passes to
   providers (`GAL-local-off`).
 - `DETECTION_LIFETIME_SECONDS: Final[int] = 86_400`: 24 hours, the same default period as the cache
@@ -588,6 +624,8 @@ as `software-design.md` requires. An earlier version of this section put every c
 - `DEFAULT_NAMESPACE: Final[str] = "default"`, `KUBECONFIG_ENV_VAR: Final[str] = "KUBECONFIG"`,
   `DEFAULT_KUBECONFIG: Final[str] = "~/.kube/config"`, `KUBE_DIRECTORY_NAME: Final[str] = ".kube"`, and
   `LOCAL_ALIAS: Final[str] = "local"`: moved literals.
+- `DEFAULT_KUBE_DIRECTORY_DEPTH: Final[int] = 0`: today's walk reads only a directory's own files
+  (`GAL-expand`).
 - `MAX_KUBE_CONTEXTS: Final[int] = 64`: the same bound as directory entries (`GAL-kube-contexts`).
 - `ALL_CONTEXTS: Final[str] = "*"` and `TARGET_CONTEXT_SEPARATOR: Final[str] = "/"` (`GAL-kube-contexts`).
 
@@ -595,7 +633,8 @@ as `software-design.md` requires. An earlier version of this section put every c
 
 - `MAX_SCAN_ENTRIES: Final[int] = 1024` and `MAX_SCAN_SECONDS: Final[float] = 0.25`: moved from
   `DotEnvProvider` class attributes.
-- `DOTENV_FILE_NAME: Final[str] = ".env"` and `DOTENV_FILE_PREFIX: Final[str] = ".env."`: moved literals.
+- `DEFAULT_DOTENV_NAMES: Final[tuple[str, ...]] = (".env", ".env.*")`: the file-name patterns that reproduce
+  today's `_is_dotenv_name` (`GAL-expand`).
 
 `src/hiddengems/gems/onepassword_constants.py` (`GAL-settings`):
 
@@ -656,6 +695,9 @@ Each change below alters a contract or behavior and requires explicit approval b
   unchanged.
 - **`GAL-sdk-optional`: a supported provider that detected nothing reports `ABSENT`.** Behavior change:
   `LookupResult.providers` showed `None` for it before.
+- **`GAL-expand`: `AbstractGemProvider` gains the non-abstract `expand()` hook, and a declared directory is
+  expanded.** Contract extension, and a behavior change that strengthens: today a declared directory is
+  dropped without a report.
 - **`GAL-selector`: unknown selector key raises `InvalidSelectorError`.** Behavior change, strengthening. Today the
   result is `GemNotFoundError`, which hides the typo.
 - **`GAL-settings`: unknown settings key raises at config load.** Behavior change, strengthening. Today it is
@@ -748,8 +790,9 @@ entries inside a phase are in delivery order:
    5. `GAL-sdk-optional`, including the `UNSUPPORTED` and `ABSENT` states.
 3. **Configuration.** Declared targets, so each cluster is one entry.
    1. `GAL-targets`. Rides along: the v1 migration and the JSON Schema.
-   2. `GAL-local-off`.
-   3. `GAL-kube-contexts`.
+   2. `GAL-expand`.
+   3. `GAL-local-off`.
+   4. `GAL-kube-contexts`.
 4. **Resolution.** The table in [Router and resolution](#45-router-and-resolution).
    1. `GAL-scope`.
    2. `GAL-routing`.
@@ -846,6 +889,11 @@ blocks. A default is a recommendation, not a decision; each entry stays open unt
 - **`GAL-masked-value-api`:** does `dig_gem` always return `SecretValue` objects, or only when asked?
   Options: always, which breaks callers that use the value as a `str`; or opt-in with `masked=True`. Default: opt-in.
   Blocks: `GAL-masked-value`.
+- **`GAL-onepassword-unknown`:** proposed feature. When the 1Password desktop app is present but neither the
+  CLI nor the SDK is available, detection reports a detected instance whose lookups are UNKNOWN, with the
+  next action "install or enable the 1Password CLI or SDK, then re-run", instead of nothing.
+  Options: add it to the feature index, with its own proposal listing the app locations it checks per
+  operating system; or keep today's silence. Default: add it. Blocks: `GAL-case-onepassword-unknown`.
 - **`GAL-yaml-start`:** add `---` to `standards-binding.yaml` to clear the yamllint warning, or leave the
   warning, which does not fail `make bless`.
   Default: add it, as `environment.yml` does. Blocks: nothing; it is part of `GAL-lint-clean`.
@@ -1038,6 +1086,14 @@ Scope lists where each one went.
     canonical `instance_id` merge into one record, keeping both evidence entries.
 - **Existing tests changed:** none; the routing tests keep pointing `config_path` at a missing file.
 - **Blocked by:** nothing. `GAL-config-env` would only add an override later.
+
+### GAL-expand
+
+Specified in [GAL-expand.md](gal/GAL-expand.md), revision 1. A declared dotenv or kubeconfig directory expands
+into one target per file, bounded by depth, file names, entries, and time, through a non-abstract `expand()`
+hook. Defaults reproduce today's discovery.
+
+- **Blocked by:** `GAL-targets`.
 
 ### GAL-local-off
 
