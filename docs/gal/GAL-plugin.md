@@ -1,8 +1,13 @@
 # GAL-plugin: provider contract and writable capability
 
-Status: proposal, revision 8. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 9. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
 writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 9 states that under option one this feature does not dissolve: it still delivers the constants package,
+the capability types, and the `tests/contract/` kit that later features build on. It also lists every new
+provider in the overview's Specification as requiring this feature, and names each acceptance test in the gate
+entries.
 
 Revision 8 converges this proposal with the other proposals:
 
@@ -249,7 +254,9 @@ above.
 
 ## Layout
 
-Option two changes these files. Option one changes none.
+Option two changes these files. Option one changes only `abstraction.py`, `constants/__init__.py`, and the two
+`tests/contract/` files; under option one, `constants/capability.py` is created by `GAL-parallel`, the first
+feature that then has a constant for it.
 
 ```text
 ~ src/hiddengems/abstract_provider.py            put_gem leaves the base; WritableGemProvider; write_capability
@@ -361,7 +368,8 @@ baseline is commit `4438234`.
 - **Actual caller:** `HiddenGems.hide_gem` (`hidden_gems.py:351`). The one test caller is
   `tests/test_hidden_gems_dotenv.py:442`, on `DotEnvProvider`.
 - **Acceptance tests:** `test_only_dotenv_is_writable`, `test_read_only_providers_have_no_put_gem`,
-  `test_writable_provider_without_put_gem_is_abstract`, and the three existing dotenv write tests.
+  `test_writable_provider_without_put_gem_is_abstract`, `test_dotenv_provider_put_returns_only_reference_metadata`,
+  `test_add_and_overwrite_preserve_other_entries_and_comments`, and `test_dry_run_neither_creates_nor_changes_files`.
 
 #### `WritableGemProvider`
 
@@ -419,7 +427,11 @@ baseline is commit `4438234`.
 - **Behavior:** the five steps listed under `src/hiddengems/hidden_gems.py` above.
 - **Implementation owner:** `hidden_gems.py`.
 - **Actual caller:** the caller of the library.
-- **Acceptance tests:** the cases of the two entries above, and the three existing dotenv write tests.
+- **Acceptance tests:** `test_write_capability_reports_each_state`,
+  `test_hide_gem_rejects_read_only_provider_before_any_call`, `test_legacy_writer_registered_through_provider_types`,
+  `test_inherited_legacy_writer_registered_through_provider_types`,
+  `test_dotenv_provider_put_returns_only_reference_metadata`,
+  `test_add_and_overwrite_preserve_other_entries_and_comments`, and `test_dry_run_neither_creates_nor_changes_files`.
 
 ### 2. What each extension extends
 
@@ -469,8 +481,8 @@ One new class and one reuse, under the overview's exception rules:
   legacy writer path. A legacy writer is a deprecated way to declare writing, which is what `DeprecationWarning`
   already means.
 
-The check that enforces the rules for every feature is delivered here, because this is the first feature that
-adds a class:
+The check that enforces the rules for every feature is delivered here, because this feature is delivered first
+(plan 2.1) and, under option two, adds the first class:
 
 - **`test_exception_classes_match_the_register`,** in `tests/contract/test_provider_contract.py`.
   - Input: every module under `hiddengems`, imported with `pkgutil.walk_packages`.
@@ -558,11 +570,16 @@ None. `abc`, `enum`, `dataclasses`, and `warnings` are in the standard library.
 The `put_gem` decision:
 
 - **Option one: keep `put_gem` in `AbstractGemProvider`.**
-  - Files: none. Behavior: unchanged. The three read-only providers keep their stubs, which stay non-compliant
-    with `python-standards-contract.md`.
-  - Consequence: this feature has no production capability left, and tests alone cannot land, so `GAL-plugin`
-    dissolves. `test_every_registered_provider_is_concrete` moves to `GAL-discovery`, and `GAL-write-target`
-    keeps today's stub behavior.
+  - Files: `abstraction.py`, `constants/__init__.py`, and the two `tests/contract/` files. Behavior: unchanged.
+    The three read-only providers keep their stubs, which stay non-compliant with `python-standards-contract.md`.
+  - Consequence: `GAL-plugin` still delivers `constants/__init__.py`, `Capability`, `CapabilityState`,
+    `CapabilityObservation`, `EvidenceSource.PROVIDER_CLASS`, the `tests/contract/` kit with
+    `EnvironmentProvider`, `test_every_registered_provider_is_concrete`, and
+    `test_exception_classes_match_the_register`, because later features build on them. `put_gem` stays abstract
+    in `AbstractGemProvider`, so the kit's `EnvironmentProvider` also defines the `put_gem` shown for
+    `WritableEnvironmentProvider`, and `constants/capability.py` is created by `GAL-parallel`. It adds no
+    `WritableGemProvider`, `write_capability`, or `ProviderNotWritableError`; `hide_gem` calls `put_gem` as today,
+    and `GAL-write-target` keeps today's stub behavior.
 - **Option two: move `put_gem` to `WritableGemProvider`,** as specified above. Recommended: it removes the
   incomplete implementations, and the check in `hide_gem` rests on declared evidence, not on what a stub does.
 
@@ -603,7 +620,9 @@ Removing `src/hiddengems/abstract_provier.py`, a separate decision:
 
 ## Acceptance cases
 
-All cases are in `tests/contract/test_provider_contract.py` and apply to option two.
+All cases are in `tests/contract/test_provider_contract.py` and apply to option two. Under option one,
+`test_every_registered_provider_is_concrete` and `test_exception_classes_match_the_register` also apply, the
+latter without the `ProviderNotWritableError` entry.
 
 - **Enumeration:** `GemProvider.provider_types`. Importing it imports the four provider modules. `kubernetes` is a
   required dependency imported at the top of `k8s_provider.py`; the 1Password SDK is imported lazily inside
@@ -702,6 +721,8 @@ compared with `observed_at` normalized to `None`.
     `tests/contract/`.
   - `GAL-remember` and `GAL-secure-cache` extend `tests/contract/`.
   - `GAL-expand` adds two cases to `tests/contract/test_provider_contract.py`.
+  - Every new provider in the overview's Specification, which implements the `AbstractGemProvider` contract
+    defined here.
 - **Hooks:** the features listed under [Scope](#scope) define their own hooks when their proposals are revised.
 
 Proposed new features. They are not in the feature index and need the owner's approval before they are added:
