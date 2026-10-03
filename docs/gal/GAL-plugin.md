@@ -1,8 +1,22 @@
 # GAL-plugin: provider contract and writable capability
 
-Status: proposal, revision 7. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 8. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
 writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 8 converges this proposal with the other proposals:
+
+- every constant this feature declares moves to `src/hiddengems/constants/capability.py`, which this feature
+  creates together with `src/hiddengems/constants/__init__.py`. The message of `ProviderNotWritableError` becomes
+  the constant `PROVIDER_NOT_WRITABLE_MESSAGE`;
+- `write_capability` takes `provider_type: type`;
+- `GAL-parallel`, `GAL-remember`, `GAL-secure-cache`, and `GAL-expand` are listed as features that require this
+  one;
+- the acceptance cases name both points where the Keychain library loads: `KeyringProvider.detect` and its
+  constructor;
+- the worked example names its literals as module-level constants;
+- `GAL-return-gate` stays Locked until its proposal declares the five parts of the gate, and this feature never
+  removes the legacy writer path.
 
 Revision 7 narrows the input rule of `write_capability`: only an input that is not a class raises
 `TypeError`. A class that does not subclass `AbstractGemProvider`, such as a test double registered by
@@ -101,7 +115,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 from hiddengems.abstract_provider import AbstractGemProvider, WritableGemProvider
 from hiddengems.abstraction import (
@@ -116,6 +130,10 @@ from hiddengems.abstraction import (
 )
 
 EXAMPLE_INSTANCE_ID = "environ:process"
+EXAMPLE_EVIDENCE_DESCRIPTION: Final[str] = "Process environment"
+EXAMPLE_GONE_REASON: Final[str] = "The environment variable is no longer set"
+EXAMPLE_GONE_NEXT_ACTION: Final[str] = "Set it again, then retry"
+EXAMPLE_STRING_ONLY_MESSAGE: Final[str] = "The process environment stores strings only"
 
 
 class EnvironmentProvider(AbstractGemProvider):
@@ -134,7 +152,7 @@ class EnvironmentProvider(AbstractGemProvider):
         :param options: Unused; the environment needs no configuration.
         :returns: One record, because the environment always exists.
         """
-        evidence = DetectionEvidence(EvidenceSource.ENVIRONMENT, "Process environment")
+        evidence = DetectionEvidence(EvidenceSource.ENVIRONMENT, EXAMPLE_EVIDENCE_DESCRIPTION)
         return (DetectedProvider(cls.name, EXAMPLE_INSTANCE_ID, ProviderState.READY, (evidence,), {}),)
 
     def find_gem(
@@ -158,9 +176,7 @@ class EnvironmentProvider(AbstractGemProvider):
         try:
             return [os.environ[reference.name]]
         except KeyError as error:
-            raise ProviderLookupError(
-                "The environment variable is no longer set", "Set it again, then retry"
-            ) from error
+            raise ProviderLookupError(EXAMPLE_GONE_REASON, EXAMPLE_GONE_NEXT_ACTION) from error
 
 
 class WritableEnvironmentProvider(EnvironmentProvider, WritableGemProvider):
@@ -184,7 +200,7 @@ class WritableEnvironmentProvider(EnvironmentProvider, WritableGemProvider):
         if criteria:
             raise ProviderNotApplicable
         if not isinstance(value, str):
-            raise TypeError("The process environment stores strings only")
+            raise TypeError(EXAMPLE_STRING_ONLY_MESSAGE)
         if not dry_run:
             os.environ[name] = value
         return GemReference(name=name, provider=self.name, instance_id=self.instance_id)
@@ -239,6 +255,8 @@ Option two changes these files. Option one changes none.
 ~ src/hiddengems/abstract_provider.py            put_gem leaves the base; WritableGemProvider; write_capability
 ~ src/hiddengems/abstraction.py                  Capability, CapabilityState, CapabilityObservation; EvidenceSource.PROVIDER_CLASS
 ~ src/hiddengems/hidden_gems.py                  ProviderNotWritableError; capability check in hide_gem
++ src/hiddengems/constants/__init__.py           the constants package
++ src/hiddengems/constants/capability.py         the reasons, the error message, and the legacy writer warning
 ~ src/hiddengems/gems/dotenv_provider.py         DotEnvProvider subclasses WritableGemProvider
 ~ src/hiddengems/gems/k8s_provider.py            put_gem stub removed
 ~ src/hiddengems/gems/onepassword_provider.py    put_gem stub removed
@@ -257,7 +275,7 @@ Option two changes these files. Option one changes none.
 - **New: `class WritableGemProvider(AbstractGemProvider)`.** It defines no `__init__` and holds no state. Its one
   abstract method, decorated with `@abstractmethod`, has the exact `put_gem` signature removed from the base.
   Errors are unchanged: this moves the method and changes no implementation of it.
-- **New: `write_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation`.** Never returns
+- **New: `write_capability(provider_type: type) -> CapabilityObservation`.** Never returns
   `None`. Its source is always `EvidenceSource.PROVIDER_CLASS`, because it reads only the class. The rules
   apply in this order:
   1. an input that is not a class raises `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`. Every class is
@@ -269,12 +287,9 @@ Option two changes these files. Option one changes none.
      anything;
   4. any other class gives `UNSUPPORTED`, with `WRITE_UNSUPPORTED_REASON`.
 
-  `_MISSING` is a module-private `object()` sentinel, so the lookup never uses `None`. The reasons are
-  `Final[str]` constants in `abstract_provider.py`:
-  - `WRITE_SUPPORTED_REASON = "Subclasses WritableGemProvider"`;
-  - `WRITE_LEGACY_REASON = "Resolves put_gem without subclassing WritableGemProvider"`;
-  - `WRITE_UNSUPPORTED_REASON = "Does not subclass WritableGemProvider and resolves no put_gem"`;
-  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs a class, not {value!r}"`.
+  `_MISSING` is a module-private `object()` sentinel, so the lookup never uses `None`. The reasons and the
+  input error are `Final[str]` constants that `abstract_provider.py` imports, listed under
+  `src/hiddengems/constants/capability.py` below.
 
   A structural `typing.Protocol` with `runtime_checkable` is rejected, because it reports any object with a
   `put_gem` attribute as writable, including a stub that only raises.
@@ -296,12 +311,11 @@ Option two changes these files. Option one changes none.
 - **New: `class ProviderNotWritableError(NotImplementedError)`.**
   - `__init__(self, provider: str, instance_id: str, observation: CapabilityObservation) -> None`, storing all
     three as attributes.
-  - Message: `f"Provider {provider!r} instance {instance_id!r} cannot store gems"`. Neither the gem name nor the
-    value appears in it.
+  - Message: `PROVIDER_NOT_WRITABLE_MESSAGE`, from `constants/capability.py`, formatted with `provider` and
+    `instance_id`. Neither the gem name nor the value appears in it.
   - Subclassing `NotImplementedError` keeps existing `except NotImplementedError` handlers working.
-- **New constant, legacy writer path only:** `LEGACY_WRITER_WARNING: Final[str]`, with the value
-  `"{provider_class} defines put_gem without subclassing WritableGemProvider; subclass WritableGemProvider to
-  keep writing"`, formatted with the class name.
+- **Constant used, legacy writer path only:** `LEGACY_WRITER_WARNING`, from `constants/capability.py`, formatted
+  with the class name.
 - **Call site, `HiddenGems.hide_gem`:**
   1. Select the record exactly as today: `ProviderRequiredError` when no provider is given,
      `ProviderNotAvailableError` when none matches, and `AmbiguousGemError` when more than one matches.
@@ -315,6 +329,18 @@ Option two changes these files. Option one changes none.
 - **Built-in transitions:**
   - `DotEnvProvider` subclasses `WritableGemProvider`; `put_gem` is unchanged.
   - `KubernetesProvider`, `OnePasswordProvider`, and `KeyringProvider` lose their stubs and stay read-only.
+
+`src/hiddengems/constants/capability.py`, new, created with `src/hiddengems/constants/__init__.py`:
+
+- **Every constant this feature declares,** each `Final[str]`. `abstract_provider.py` and `hidden_gems.py`
+  import them, and the tests import them instead of repeating the values:
+  - `WRITE_SUPPORTED_REASON = "Subclasses WritableGemProvider"`;
+  - `WRITE_LEGACY_REASON = "Resolves put_gem without subclassing WritableGemProvider"`;
+  - `WRITE_UNSUPPORTED_REASON = "Does not subclass WritableGemProvider and resolves no put_gem"`;
+  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs a class, not {value!r}"`;
+  - `LEGACY_WRITER_WARNING = "{provider_class} defines put_gem without subclassing WritableGemProvider; subclass
+    WritableGemProvider to keep writing"`, legacy writer path only;
+  - `PROVIDER_NOT_WRITABLE_MESSAGE = "Provider {provider!r} instance {instance_id!r} cannot store gems"`.
 
 ## Abstraction-extension gate
 
@@ -350,14 +376,14 @@ baseline is commit `4438234`.
 
 #### `write_capability`
 
-- **Signature:** `def write_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation` in
-  `abstract_provider.py`.
+- **Signature:** `def write_capability(provider_type: type) -> CapabilityObservation` in `abstract_provider.py`.
 - **Status:** MUST ADD.
 - **Behavior:** the four rules under [Names, signatures, errors, and call sites](#names-signatures-errors-and-call-sites).
   It returns `CapabilityObservation(capability=Capability.WRITE, state=<the rule's state>,
   source=EvidenceSource.PROVIDER_CLASS, reason=<the rule's constant>)`. It reads only the class, never an
   instance, and never returns `None`.
-- **Implementation owner:** `abstract_provider.py`.
+- **Implementation owner:** `abstract_provider.py`; its reason and error constants are in
+  `constants/capability.py`.
 - **Actual caller:** `HiddenGems.hide_gem`, step 2.
 - **Acceptance tests:** `test_write_capability_reports_each_state`,
   `test_write_capability_rejects_a_non_class_input`, and
@@ -375,11 +401,12 @@ baseline is commit `4438234`.
 #### `ProviderNotWritableError` and `LEGACY_WRITER_WARNING`
 
 - **Signature:** `class ProviderNotWritableError(NotImplementedError)` with
-  `__init__(self, provider: str, instance_id: str, observation: CapabilityObservation) -> None`, and
-  `LEGACY_WRITER_WARNING: Final[str]`, both in `hidden_gems.py`.
-- **Status:** MUST ADD; the constant only with the legacy writer path.
-- **Behavior:** as listed under `src/hiddengems/hidden_gems.py` above.
-- **Implementation owner:** `hidden_gems.py`.
+  `__init__(self, provider: str, instance_id: str, observation: CapabilityObservation) -> None`, in
+  `hidden_gems.py`; `PROVIDER_NOT_WRITABLE_MESSAGE: Final[str]` and `LEGACY_WRITER_WARNING: Final[str]`, in
+  `constants/capability.py`.
+- **Status:** MUST ADD; `LEGACY_WRITER_WARNING` only with the legacy writer path.
+- **Behavior:** as listed under `src/hiddengems/hidden_gems.py` and `src/hiddengems/constants/capability.py` above.
+- **Implementation owner:** `hidden_gems.py`; the two constants are in `constants/capability.py`.
 - **Actual caller:** `HiddenGems.hide_gem`, steps 4 and 5.
 - **Acceptance tests:** `test_hide_gem_rejects_read_only_provider_before_any_call`,
   `test_legacy_writer_registered_through_provider_types`, and
@@ -432,13 +459,15 @@ One new class and one reuse, under the overview's exception rules:
   - Base: `NotImplementedError`, because the three stubs raise it today (`k8s_provider.py:610-625`,
     `onepassword_provider.py:489-498`, `keyring_provider.py:216-232`). An existing `except NotImplementedError`
     still catches it.
-  - Attributes `provider`, `instance_id`, and `observation`; the message names the provider and instance only.
+  - Attributes `provider`, `instance_id`, and `observation`; the message, `PROVIDER_NOT_WRITABLE_MESSAGE` from
+    `constants/capability.py`, names the provider and instance only.
   - Cases: `test_hide_gem_rejects_read_only_provider_before_any_call` asserts that it is a `NotImplementedError`
     and that neither the gem name nor the value is in its message.
 - **Reused: `TypeError`** from `write_capability` for an input that is not a class.
   This is a programming error in the caller, which is what `TypeError` already means.
-- **Warning reused: `DeprecationWarning`** with `LEGACY_WRITER_WARNING`, under the legacy writer path. A legacy
-  writer is a deprecated way to declare writing, which is what `DeprecationWarning` already means.
+- **Warning reused: `DeprecationWarning`** with `LEGACY_WRITER_WARNING` from `constants/capability.py`, under the
+  legacy writer path. A legacy writer is a deprecated way to declare writing, which is what `DeprecationWarning`
+  already means.
 
 The check that enforces the rules for every feature is delivered here, because this is the first feature that
 adds a class:
@@ -461,7 +490,8 @@ What this feature adds, against today's contract:
   the unchanged signature.
 - **`EvidenceSource`:** before, nine members. After, the same nine, plus `PROVIDER_CLASS`.
 - **New names:** `Capability`, `CapabilityState`, `CapabilityObservation`, `write_capability`,
-  `ProviderNotWritableError`, and, with the legacy writer path, `LEGACY_WRITER_WARNING`.
+  `ProviderNotWritableError`, and the module `hiddengems.constants.capability`, whose constants include
+  `PROVIDER_NOT_WRITABLE_MESSAGE` and, with the legacy writer path, `LEGACY_WRITER_WARNING`.
 - **`HiddenGems.hide_gem`:** before, it calls `put_gem` unconditionally. After, it checks `write_capability`
   first. Its signature and its `GemReference` result are unchanged.
 - **Unchanged:**
@@ -477,7 +507,8 @@ These are required, but not delivered here. This feature changes no lookup or re
   - It checks what `detect`, `find_gem`, `get_gem`, and `put_gem` return before the library uses or returns it:
     container and record types, provider and instance identity, and declared metadata fields. It also checks the
     partial matches carried by `ProviderLookupError`.
-  - Proposed names, to be fully specified in its own proposal:
+  - Proposed names. `GAL-return-gate` stays Locked in the overview's Register until its proposal declares the
+    five parts of the gate and justifies `ProviderContractError`:
     - module `src/hiddengems/contract_check.py`;
     - `check_detected(provider_type, records) -> tuple[DetectedProvider, ...]`;
     - `check_references(instance, references) -> tuple[GemReference, ...]`;
@@ -540,8 +571,8 @@ Legacy writers, a decision that applies only with option two:
 - **With the legacy writer path (recommended).** A provider that `write_capability` reports as `UNKNOWN` is
   still written to, with a `DeprecationWarning`. Existing behavior is kept for every caller. The built-in
   read-only providers report `UNSUPPORTED` and are refused. A third-party stub that only raises
-  `NotImplementedError` still raises it from the call, as it does today. Removing the path later is its own
-  decision.
+  `NotImplementedError` still raises it from the call, as it does today. This feature never removes the path;
+  removing it needs a proposal that declares the change under the gate.
 - **Without it.** Only `SUPPORTED` providers are written to. A legacy writer registered through
   `provider_types` raises `ProviderNotWritableError` until its author changes the base class.
 
@@ -576,10 +607,11 @@ All cases are in `tests/contract/test_provider_contract.py` and apply to option 
 
 - **Enumeration:** `GemProvider.provider_types`. Importing it imports the four provider modules. `kubernetes` is a
   required dependency imported at the top of `k8s_provider.py`; the 1Password SDK is imported lazily inside
-  `OnePasswordProvider`; the Keychain library loads only when `KeyringProvider` is instantiated. No unavailable
-  SDK is imported.
-- **Class-level checks:** checks on classes, not instances, so no provider is instantiated and the Keychain
-  library never loads.
+  `OnePasswordProvider`; the Keychain library loads when `KeyringProvider.detect` runs
+  (`keyring_provider.py:146-150`) or when `KeyringProvider` is instantiated (`keyring_provider.py:134`). No
+  unavailable SDK is imported.
+- **Class-level checks:** checks on classes, not instances. They call neither `KeyringProvider.detect` nor its
+  constructor, so the Keychain library never loads.
 - **Test providers:** registered with the `GemProvider.create` monkeypatch pattern already used in
   `tests/test_hidden_gems_routing.py`.
 
@@ -666,6 +698,10 @@ compared with `observed_at` normalized to `None`.
     and adds `target=` and the candidate target list.
   - `GAL-discovery` validates loaded classes against `AbstractGemProvider` as defined here.
   - `GAL-explain` and `GAL-cli-targets` report `CapabilityObservation` values per target.
+  - `GAL-parallel` uses `Capability`, `CapabilityObservation`, and `EvidenceSource.PROVIDER_CLASS`, and extends
+    `tests/contract/`.
+  - `GAL-remember` and `GAL-secure-cache` extend `tests/contract/`.
+  - `GAL-expand` adds two cases to `tests/contract/test_provider_contract.py`.
 - **Hooks:** the features listed under [Scope](#scope) define their own hooks when their proposals are revised.
 
 Proposed new features. They are not in the feature index and need the owner's approval before they are added:
