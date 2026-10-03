@@ -108,7 +108,7 @@ Out of scope:
 ~ src/hiddengems/schemas/gem-provider-config.schema.json  the remembered object
 ~ src/hiddengems/gems/dotenv_provider.py         environment_names
 ~ src/hiddengems/gems/k8s_provider.py            environment_names; revalidate
-~ src/hiddengems/gems/kubernetes_constants.py    revalidation reasons; CONTEXT_SETTING
+~ src/hiddengems/gems/kubernetes_constants.py    revalidation reasons
 ~ src/hiddengems/gems/keyring_provider.py        environment_names; revalidate
 ~ src/hiddengems/gems/keychain_constants.py      LIBRARY_SETTING
 ~ src/hiddengems/gems/onepassword_provider.py    environment_names; revalidate
@@ -253,7 +253,9 @@ names are listed under [Acceptance cases](#acceptance-cases).
 
 - **Signature:** the keyword-only parameter `refresh: bool = False` is added after `interactive`. Every other
   parameter is unchanged.
-- **Behavior:**
+- **Behavior:** `types=types` below is passed only when the configuration allowlists third-party types
+  (`GAL-discovery`); otherwise each factory call is made without it, exactly as today, so the baseline tests that
+  replace `GemProvider.detect` or `GemProvider.create` keep working unchanged.
   1. With `providers` given, nothing changes: the remembered store is neither read nor written.
   2. Otherwise `__init__` keeps the `detection_options` it builds today, then builds
      `fingerprint = current_fingerprint(detection_options, GemProvider.detection_environment(types=types))`,
@@ -323,10 +325,11 @@ names are listed under [Acceptance cases](#acceptance-cases).
   - `def forget_remembered(path: Path) -> None`.
 - **Behavior:**
   - `current_fingerprint` takes `system` from `platform.system()`, `user` from `getpass.getuser()`,
-    `working_directory` from `str(Path.cwd().resolve())`, and `package_version` from
-    `importlib.metadata.version(BUILTIN_DISTRIBUTION)`, or `PACKAGE_VERSION_UNKNOWN` when that raises
-    `importlib.metadata.PackageNotFoundError`, as it does when the package is imported from `src/` (the
-    `pythonpath` of `pyproject.toml`). Each digest is the SHA-256 hex digest of `canonical_json(value)`.
+    `working_directory` from `str(Path.cwd().resolve())`, and `package_version` from `installed_version()` of
+    `GAL-discovery`, which returns `importlib.metadata.version(BUILTIN_DISTRIBUTION)`, or
+    `PACKAGE_VERSION_UNKNOWN` when that raises `importlib.metadata.PackageNotFoundError`, as it does when the
+    package is imported from `src/` (the `pythonpath` of `pyproject.toml`). Each digest is the SHA-256 hex digest
+    of `canonical_json(value)`.
   - `load_remembered` never raises for the content of `remembered`, the value of `GemConfig.remembered`:
     - an empty mapping gives `ABSENT`;
     - a value of the wrong shape gives `UNREADABLE`;
@@ -489,8 +492,6 @@ One new class, and four reuses, under the overview's exception rules. This featu
 - `REMEMBERED_KEY: Final[str] = "remembered"`, the key this feature chooses inside `~/.gem_provider.json`, the
   file `docs/README.md` allows to remember detection;
 - `REMEMBERED_FORMAT: Final[int] = 1`;
-- `PACKAGE_VERSION_UNKNOWN: Final[str] = "unknown"`, the `package_version` when `BUILTIN_DISTRIBUTION` is not
-  installed;
 - `REMEMBERED_EVIDENCE_DESCRIPTION: Final[str] = "Remembered from an earlier detection"`;
 - `REMEMBERED_STORE_WARNING: Final[str] = "Remembered detection not saved to {path}: {cause}"`;
 - `PATH_TAG: Final[str] = "$path"`, `TUPLE_TAG: Final[str] = "$tuple"`, and
@@ -512,7 +513,6 @@ One new class, and four reuses, under the overview's exception rules. This featu
 
 - `REVALIDATION_CONTEXT_GONE: Final[str] = "Remembered context is no longer in the kubeconfig"`;
 - `REVALIDATION_KUBECONFIG_UNREADABLE: Final[str] = "Remembered kubeconfig could not be read"`;
-- `CONTEXT_SETTING: Final[str] = "context"`.
 
 `src/hiddengems/gems/keychain_constants.py`, created by `GAL-settings` (plan 2.2):
 
@@ -526,7 +526,9 @@ One new class, and four reuses, under the overview's exception rules. This featu
 `BUILTIN_DISTRIBUTION` is added to `constants/config.py` by `GAL-discovery` (plan 2.4); this feature imports
 it. `CONFIG_FILE_MODE` and `CANONICAL_JSON_SEPARATORS` are added to `constants/config.py` by `GAL-chooser`
 (plan 4.3); this feature imports them. `SCAN_ISSUE_SETTING` is added to `constants/config.py` by `GAL-expand`
-(plan 3.2); this feature imports it.
+(plan 3.2), with `CONTEXT_SETTING` in `gems/kubernetes_constants.py`; this feature imports both.
+`installed_version()` and `PACKAGE_VERSION_UNKNOWN` are added by `GAL-discovery` (plan 2.4); this feature
+imports them.
 
 ## Libraries
 
@@ -573,8 +575,9 @@ standard library.
     `GemProvider.detect` with `only: Collection[str]`.
 - **Where the remembered detection lives:**
   - (a) the `remembered` key of `~/.gem_provider.json`. Recommended: it is where `docs/README.md` puts it.
-  - (b) a separate `~/.hiddengem/remembered.json`, mode `0o600`, which leaves the user's file untouched and
-    needs no `GemConfig.remembered`.
+  - (b) a separate `~/.gem_provider.remembered.json`, mode `CONFIG_FILE_MODE`, which leaves the user's file
+    untouched and needs no `GemConfig.remembered`. It stays outside `~/.hiddengem`, the root of
+    `GAL-secure-cache`.
 - **How many remembered entries:**
   - (a) one, replaced when the fingerprint changes. Recommended: it is the simplest, and detection is bounded.
   - (b) one per working directory, at most a fixed number, so work in two projects does not detect again on
@@ -604,7 +607,9 @@ remembers.
   calls raise; all three run, the store is empty, and one `ExceptionGroup` holds the two errors.
 - **C7** `test_detect_reads_only_declared_environment_names`: for each `p ∈ P` and each of `Darwin`, `Linux`,
   and `Windows`, the names that `detect()` reads from a recording `os.environ` are a subset of
-  `environment_names`.
+  `environment_names`. `shutil.which` and `ctypes.util.find_library` are patched to return nothing, because
+  their own reads differ by runner; `KeyringProvider` is exercised only with `Darwin`, the one system it
+  supports.
 - **C8** `test_revalidate_returns_a_revalidation_for_every_provider`: for each `p ∈ P`, `revalidate` on a
   recorded detection returns a `Revalidation`, never `None`.
 - **C9** `test_default_revalidate_rules`: an existing path gives `VALID`, a removed path `INVALID`, an
@@ -639,7 +644,9 @@ remembers.
   contain it.
 - **R14** `test_unserializable_settings_are_not_remembered`: a callable in settings writes nothing and warns.
 - **R15** `test_remembered_records_round_trip_equal`: records from all four built-in `detect()` methods, on
-  recorded inputs, compare equal after a save and a load.
+  recorded inputs, are saved and loaded; each loaded record equals its original with
+  `DetectionEvidence(EvidenceSource.REMEMBERED, REMEMBERED_EVIDENCE_DESCRIPTION, None, observed_at)` appended to
+  its evidence.
 - **R16** `test_invalidate_reports_an_instance_outside_the_contract`: a `FakeProvider` instance adds one
   `TypeError` with `NOT_A_PROVIDER_MESSAGE` to the raised `ExceptionGroup`.
 - **R17** `test_uninstalled_package_never_remembers`: with `importlib.metadata.version` raising
