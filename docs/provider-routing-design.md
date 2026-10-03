@@ -116,11 +116,29 @@ optional argument.
 - **Capabilities follow the same rule.** What a target supports is reported as SUPPORTED, UNSUPPORTED, or
   UNKNOWN, with the `EvidenceSource` it rests on. The next revision of `GAL-plugin` applies this to the write
   capability.
-- **Names that still use `None` for a state** are replaced in their own revisions:
-  `ProviderObservation.state` (`GAL-sdk-optional`), `GemProvider.classify` (`GAL-sdk-optional`),
-  `settings_type()` (`GAL-settings`), `selector_type()` (`GAL-selector`), `LookupResult.resolution`
-  (`GAL-scope`), `HiddenGems._route_for` (`GAL-routing`), `terminal_chooser` (`GAL-chooser`), and
-  `load_remembered` (`GAL-remember`).
+- **Today's source still uses `None`, or free text, for a state in these places,** each assigned to the feature
+  that replaces it with an explicit value. Lines are at commit `4438234`.
+
+| Where | `None` stands for | Becomes | Feature |
+| --- | --- | --- | --- |
+| `abstraction.py:109` | declared but not detected | `ProviderState.ABSENT` | `GAL-sdk-optional` |
+| `keyring_provider.py:67-74` | Keychain item not found | status enum from `keychain_bridge.h` | Keychain existence |
+| `onepassword_provider.py:223` | no CLI, labelled `UNKNOWN` | a known "not found" result | `GAL-onepassword-unknown` |
+| `onepassword_provider.py:86,234` | no access path; nothing detected | lookups UNKNOWN | `GAL-onepassword-unknown` |
+| `onepassword_provider.py:346` | use the default account | a default-account marker | `GAL-onepassword-unknown` |
+| `k8s_provider.py:277-285,452` | bad kubeconfig, skipped | UNKNOWN with a reason | `GAL-kube-contexts` |
+| `k8s_provider.py:292-298,459` | malformed contexts list, skipped | UNKNOWN with a reason | `GAL-kube-contexts` |
+| `dotenv_provider.py:442-454,481` | declared file missing, skipped | `Presence.ABSENT` | `GAL-expand` |
+| `dotenv_provider.py:369-418` | walk outcome as free text | `DotEnvWalkOutcome` | `GAL-expand` |
+| `k8s_provider.py:92-203` | walk and file outcomes as free text | `KubeWalkOutcome`, `KubeFileIssue` | `GAL-expand` |
+| `hidden_gems.py:166` | no explicit selection | an explicit scope rule | `GAL-scope` |
+| `k8s_provider.py:76` | pseudo-instance with no file | the pseudo-instance marker | first consumer |
+
+  `None` stays only where it means "not given" for an optional argument, such as `criteria=None`, and for a date
+  a provider does not expose, which `docs/README.md` says "remains empty". The specification's own names that
+  still return `None` for a state are replaced the same way, each in its feature's revision:
+  `GemProvider.classify`, `settings_type()`, `selector_type()`, `LookupResult.resolution`,
+  `HiddenGems._route_for`, `terminal_chooser`, and `load_remembered`.
 
 ### Cases
 
@@ -165,7 +183,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-discovery` | Entry-point provider loading with a config allowlist | [Registry](#43-registry-and-loading) |
 | `GAL-sdk-optional` | Missing provider SDK reported as `Unsupported`, not an import error | [Registry](#43-registry-and-loading) |
 | `GAL-targets` | Named targets in config v2, with v1 migration and JSON Schema | [Configuration](#44-configuration-v2) |
-| `GAL-expand` | A declared directory expands into one target per file, within bounds | [GAL-expand.md](gal/GAL-expand.md) |
+| `GAL-expand` | A declared pattern expands into one target per file, bounded and guarded | [GAL-expand.md](gal/GAL-expand.md) |
 | `GAL-scope` | Explicit preference order; a stale preference never widens | [Router](#45-router-and-resolution) |
 | `GAL-routing` | Pattern routes from gem names to targets | [Configuration](#44-configuration-v2) |
 | `GAL-local-off` | `discovery.local` switch for implicit discovery | [Configuration](#44-configuration-v2) |
@@ -650,6 +668,9 @@ as `software-design.md` requires. An earlier version of this section put every c
 - `BUILD_LIBRARY_DIRS: Final[tuple[str, ...]]`, holding `"cmake-build-debug/Debug"`,
   `"cmake-build-release/Release"`, and `"build"`: moved from `_library_candidates`.
 
+`GAL-expand` also adds the pattern budget, cloud-sync guard, and walk-outcome constants and enums listed in
+[GAL-expand.md](gal/GAL-expand.md#constants-and-enums).
+
 Each new provider gets `src/hiddengems/gems/<name>_constants.py`. Every environment variable, path, and
 executable named in its [Specification](#10-specification) entry becomes a constant there, named
 `<WHAT>_ENV_VAR`, `<WHAT>_PATH`, or `<WHAT>_EXECUTABLE`.
@@ -695,9 +716,10 @@ Each change below alters a contract or behavior and requires explicit approval b
   unchanged.
 - **`GAL-sdk-optional`: a supported provider that detected nothing reports `ABSENT`.** Behavior change:
   `LookupResult.providers` showed `None` for it before.
-- **`GAL-expand`: `AbstractGemProvider` gains the non-abstract `expand()` hook, and a declared directory is
-  expanded.** Contract extension, and a behavior change that strengthens: today a declared directory is
-  dropped without a report.
+- **`GAL-expand`: `AbstractGemProvider` gains the non-abstract `expand()` hook; declared patterns expand under a
+  guard.** Contract extension. Behavior changes: implicit dotenv discovery skips cloud-sync folders and reports
+  the skip; a declared plain path that names a directory raises `ValueError` instead of being dropped; a
+  declared location that yields nothing is reported ABSENT.
 - **`GAL-selector`: unknown selector key raises `InvalidSelectorError`.** Behavior change, strengthening. Today the
   result is `GemNotFoundError`, which hides the typo.
 - **`GAL-settings`: unknown settings key raises at config load.** Behavior change, strengthening. Today it is
@@ -1089,11 +1111,12 @@ Scope lists where each one went.
 
 ### GAL-expand
 
-Specified in [GAL-expand.md](gal/GAL-expand.md), revision 1. A declared dotenv or kubeconfig directory expands
-into one target per file, bounded by depth, file names, entries, and time, through a non-abstract `expand()`
-hook. Defaults reproduce today's discovery.
+Specified in [GAL-expand.md](gal/GAL-expand.md), revision 2. A target expands only when its path is a pattern,
+such as `~/clusters/*/kubeconfig`; a plain path names one file. A guard keeps every walk out of home-wide
+trees, cloud-sync folders, network mounts, and online-only files. Every declared location that yields nothing
+is reported ABSENT, and walk outcomes become enums.
 
-- **Blocked by:** `GAL-targets`.
+- **Blocked by:** `GAL-targets` and `GAL-sdk-optional`.
 
 ### GAL-local-off
 
