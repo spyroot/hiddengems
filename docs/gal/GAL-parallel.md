@@ -1,8 +1,21 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 9. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 10. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 10 answers review finding GPA8 and the advisories of the review of revision 9:
+
+- GPA8: a confirmed child exit no longer implies that the receiver thread has ended. The exit gate keeps half
+  of `CHILD_EXIT_GATE_SECONDS` for the receiver phase and then reads `receiver_thread.is_alive()`; a receiver
+  that is still alive after a confirmed exit raises `ProviderLookupError(CHILD_RECEIVER_REASON,
+  CHILD_RECEIVER_NEXT_ACTION)`. Step 3 also uses `is_alive()` to decide whether an outcome is complete.
+- The early-exception cleanup is an `except BaseException` handler, not a `finally`, so a normal call never
+  kills or joins twice.
+- `os.set_inheritable` is stated as covering exec only; a process forked without exec is reported through the
+  receiver phase.
+- New cases cover the expired-deadline guard, the early-exception cleanup, confirmation by the sentinel
+  alone, a receiver that outlives the child, and the router's report of a held child.
 
 Revision 9 corrects the acceptance cases and the exit gate of `run_in_child` after review:
 
@@ -189,7 +202,7 @@ Out of scope:
 
   Contract, in two parts, each bounded by the deadline plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`:
   - **Return:** the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
-    or with `CHILD_LINGERING_REASON`, within that time.
+    or with `CHILD_LINGERING_REASON` or `CHILD_RECEIVER_REASON`, within that time.
   - **Execution:** every thread, request, and process the call starts has ended within that time.
 
   The named exceptions, each tied to an owner's choice in the
@@ -198,9 +211,11 @@ Out of scope:
     neither part holds for it;
   - under option (b), a killed child that the operating system still holds in an uninterruptible wait, such as a
     read from an unresponsive network mount. The return part holds, and the call reports the child with
-    `CHILD_LINGERING_REASON`; the execution part does not, and the child is reaped as `run_in_child` states. A
-    file on the home directory's own device is read in process: the home directory is taken as responsive, as
-    the walk guard of `GAL-expand` takes it.
+    `CHILD_LINGERING_REASON`; the execution part does not, and the child is reaped as `run_in_child` states.
+    Likewise, a receiver thread that another process keeps waiting after the child exited is reported with
+    `CHILD_RECEIVER_REASON` and ends when that process closes the pipe. A file on the home directory's own
+    device is read in process: the home directory is taken as responsive, as the walk guard of `GAL-expand`
+    takes it.
 - **Built-ins:** each implements both methods, except `KeyringProvider` under Keychain option (b). Its existing
   `find_gem` and `get_gem` delegate to them with `Deadline.unbounded()`, so direct callers keep today's behavior,
   except `KeyringProvider` under Keychain option (a), whose native read never shows a prompt.
@@ -342,7 +357,8 @@ baseline is commit `4438234`.
 - **Behavior:** the two-part contract listed under `src/hiddengems/abstract_provider.py` above, return and
   execution, with its two named exceptions: under dotenv option (a), the read of a declared dotenv file on an
   unresponsive mount; under dotenv option (b), a killed child that the operating system still holds, which keeps
-  only the return part and is reported with `CHILD_LINGERING_REASON`.
+  only the return part and is reported with `CHILD_LINGERING_REASON`, and a receiver thread still waiting after
+  the child exited, reported with `CHILD_RECEIVER_REASON`.
 - **Why it is not a parallel contract:** it subclasses `AbstractGemProvider` and adds two methods under new
   names. `find_gem` and `get_gem` stay the MUST members with their signatures unchanged, and a built-in's
   `find_gem` and `get_gem` delegate to the new methods with `Deadline.unbounded()`. A provider that does not
@@ -448,26 +464,31 @@ baseline is commit `4438234`.
   3. Receive the outcome in a daemon thread named `CHILD_RECEIVER_THREAD_NAME`, which runs `_receive_outcome`, and
      wait for that thread with `receiver_thread.join(deadline.remaining())`. With an unbounded deadline, the parent
      calls `receiver_thread.join()` with no timeout, because `join` rejects an infinite one. Step 3 ends with what
-     the thread has finished by then: one complete outcome, a `None` when the child closed the pipe without an
-     outcome, or nothing complete. A partial or slow frame is nothing complete, and whatever the thread appends
-     after step 3 ends is ignored.
+     the thread has finished by then. When `receiver_thread.is_alive()` is false after that join, the thread has
+     ended, and `box` holds one complete outcome, or a `None` when the child closed the pipe without one.
+     Otherwise step 3 ends with nothing complete: a partial or slow frame is nothing complete, and whatever the
+     thread appends after step 3 ends is ignored.
   4. Pass the exit gate, on every path. It is bounded by
-     `gate = Deadline.after(CHILD_EXIT_GATE_SECONDS, clock=deadline.clock)`, made when step 3 ends:
-     - with nothing complete, kill the child at once (`Process.kill`, `SIGKILL` on POSIX); with an outcome or a
-       `None`, call `process.join(gate.remaining() / 2)` first, and kill the child if it is still alive;
-     - call `process.join(gate.remaining())`;
+     `gate = Deadline.after(CHILD_EXIT_GATE_SECONDS, clock=deadline.clock)`, made when step 3 ends. The process
+     phase may use only the first half of it, so the receiver phase always keeps at least the second half:
+     - process phase, bounded by `process_gate = Deadline.after(CHILD_EXIT_GATE_SECONDS / 2, clock=deadline.clock)`:
+       with nothing complete, kill the child at once (`Process.kill`, `SIGKILL` on POSIX); with an outcome or a
+       `None`, call `process.join(process_gate.remaining() / 2)` first, and kill the child if it is still alive;
+       then call `process.join(process_gate.remaining())`;
      - the exit is confirmed when `process.exitcode` is set, or when
        `multiprocessing.connection.wait([process.sentinel], 0)` returns the sentinel, which also covers a child that
        another reaper collected first;
-     - only after a confirmed exit, call `receiver_thread.join(gate.remaining())`. The thread has then ended or ends
-       at once, because the child's end of the pipe is closed. After an unconfirmed exit, the parent does not wait
-       for the thread.
+     - receiver phase, only after a confirmed exit and only when step 3 ended with nothing complete: call
+       `receiver_thread.join(gate.remaining())`, and then read `receiver_thread.is_alive()`. With an outcome or a
+       `None`, the thread had already ended in step 3. After an unconfirmed exit, the parent does not wait for the
+       thread.
 
      `CHILD_EXIT_GATE_SECONDS` is half of `LOOKUP_SHUTDOWN_GRACE_SECONDS`, so `run_in_child` returns within the
      deadline plus half the grace. It therefore returns before the router's wait for its future ends, and the
      router sees `CHILD_LINGERING_REASON` rather than its own timeout. When any exception, including
-     `KeyboardInterrupt`, leaves step 3 or 4 early, a `finally` kills a child that is still alive, joins it for at
-     most `CHILD_EXIT_GATE_SECONDS`, and the exception propagates.
+     `KeyboardInterrupt`, leaves step 3 or 4 early, an `except BaseException` handler kills a child that is still
+     alive, joins it for at most `CHILD_EXIT_GATE_SECONDS`, and raises the exception again. It is not a `finally`,
+     so a call that reaches step 5 never kills or joins a second time.
   5. Return or raise, from what step 3 ended with:
 
   | Outcome by the deadline | Exit | Result |
@@ -478,15 +499,25 @@ baseline is commit `4438234`.
   | `(TRANSPORT,)` | confirmed | raises `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)` |
   | `(ERROR, error_type)` | confirmed | raises `RuntimeError(CHILD_ERROR_MESSAGE.format(error_type=error_type))` |
   | `None`, the pipe closed | confirmed | raises `RuntimeError(CHILD_EXIT_MESSAGE.format(exitcode=...))` |
-  | nothing complete | confirmed | raises `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` |
+  | nothing complete | confirmed; receiver ended | raises `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` |
+  | nothing complete | confirmed; receiver alive | raises `ProviderLookupError` with `CHILD_RECEIVER_REASON` |
   | any | not confirmed | raises `ProviderLookupError(CHILD_LINGERING_REASON, CHILD_LINGERING_NEXT_ACTION)` |
 
-  The parent unpickles an outcome only in a confirmed row. When the exit is not confirmed, a received outcome is
-  discarded without being unpickled: its value is never returned, stored, or logged. No payload limit applies; a
-  frame that is still arriving at the deadline counts as nothing complete.
+  In the `None` row, `exitcode` is `None` when only the sentinel confirmed the exit. The parent unpickles an
+  outcome only in a confirmed row. When the exit is not confirmed, a received outcome is discarded without being
+  unpickled: its value is never returned, stored, or logged. No payload limit applies; a frame that is still
+  arriving at the deadline counts as nothing complete.
+
+  A receiver thread that is still alive after a confirmed exit is waiting on a pipe whose end of file it has not
+  read: another process still holds the pipe open, such as one the provider forked without exec, or the thread
+  has not yet run. The call raises `ProviderLookupError(CHILD_RECEIVER_REASON, CHILD_RECEIVER_NEXT_ACTION)`, not
+  `CHILD_LINGERING_REASON`, because the child itself has exited. The parent does not wait further: the daemon
+  thread owns `receiver`, closes it in its `finally`, and ends when the last writer closes the pipe.
 - **Behavior of `_child_main`,** in the child. On POSIX it first calls `os.set_inheritable(sender.fileno(), False)`:
-  spawn passes the pipe through `pass_fds`, which leaves it inheritable, and no process that the provider starts
-  may hold the pipe open. It then calls `target(*args)` and pickles one outcome:
+  spawn passes the pipe through `pass_fds`, which leaves it inheritable, so a process that the provider starts
+  through exec does not inherit it. A process that the provider forks without exec still holds it; the receiver
+  phase of step 4 reports that case with `CHILD_RECEIVER_REASON`. It then calls `target(*args)` and pickles one
+  outcome:
   - a return gives `(RESULT, value)`;
   - `ProviderNotApplicable` gives `(NOT_APPLICABLE,)`;
   - `ProviderLookupError` gives `(LOOKUP_ERROR, error.reason, error.next_action, error.matches)`;
@@ -516,8 +547,11 @@ baseline is commit `4438234`.
   `test_child_read_reports_declared_transport_rejection`,
   `test_spawn_child_find_and_get_use_declared_importable_targets`,
   `test_kernel_held_child_is_reported_apart_from_a_confirmed_exit`,
-  `test_child_result_requires_confirmed_exit_before_return`, and
-  `test_child_partial_outcome_does_not_escape_deadline`.
+  `test_child_result_requires_confirmed_exit_before_return`,
+  `test_child_partial_outcome_does_not_escape_deadline`, `test_child_exit_does_not_imply_receiver_exit`,
+  `test_run_in_child_with_an_expired_deadline_starts_no_child`,
+  `test_run_in_child_kills_the_child_on_an_early_exception`, `test_child_exit_confirmed_by_the_sentinel_alone`, and
+  `test_router_reports_a_held_child_as_lingering`.
 
 #### Keychain interaction-not-allowed status
 
@@ -617,6 +651,9 @@ No new class. Each situation reuses an existing one, under the overview's except
 - **A killed child that the operating system still holds** makes `run_in_child` raise
   `ProviderLookupError(CHILD_LINGERING_REASON, CHILD_LINGERING_NEXT_ACTION)`: the instance could not be checked,
   and the reason tells the held child apart from a confirmed timeout.
+- **A receiver thread still alive after a confirmed exit** makes `run_in_child` raise
+  `ProviderLookupError(CHILD_RECEIVER_REASON, CHILD_RECEIVER_NEXT_ACTION)`: the child exited, so
+  `CHILD_LINGERING_REASON` would be wrong, and the instance could not be checked.
 - **`ProviderNotApplicable` and `ProviderLookupError` raised in the child** cross the pipe as plain data and are
   raised again in the parent with the same reason, next action, and matches, so `_inspect_within` handles them as
   in process. No exception object is pickled: `ProviderLookupError` passes only its reason to `Exception`, so a
@@ -655,6 +692,9 @@ In `src/hiddengems/constants/lookup.py`, beside the constants the overview alrea
 - `CHILD_LINGERING_REASON: Final[str] = "The provider's child process was killed, but the operating system still
   holds it"` and `CHILD_LINGERING_NEXT_ACTION: Final[str] = "Check the device or mount the provider reads, then
   retry"`, used by `run_in_child` for a killed child whose exit is not confirmed.
+- `CHILD_RECEIVER_REASON: Final[str] = "The provider's child process exited, but its result pipe is still
+  open"` and `CHILD_RECEIVER_NEXT_ACTION: Final[str] = "Check for a process the provider started that is still
+  running, then retry"`, used by `run_in_child` when the receiver thread outlives a confirmed exit.
 - `CHILD_EXIT_GATE_SECONDS: Final[float] = LOOKUP_SHUTDOWN_GRACE_SECONDS / 2`: the bound of the exit gate of
   `run_in_child`, half the grace, so that `run_in_child` returns before the router's wait for its future ends.
 - `CHILD_RECEIVER_THREAD_NAME: Final[str] = "hiddengems-child-receiver"`: names the thread in which `run_in_child`
@@ -709,7 +749,8 @@ standard library.
 - **Lookups run in parallel and are bounded,** except, under dotenv option (a), the read of a declared file on an
   unresponsive mount. Under dotenv option (b) and non-cooperative option (b), a killed child that the operating
   system still holds is reported with `CHILD_LINGERING_REASON` instead of waited for, and interpreter exit waits
-  for it. Behavior change: a lookup that hangs today now ends with an Incomplete result naming the
+  for it; a result pipe that another process still holds is reported with `CHILD_RECEIVER_REASON`. Behavior
+  change: a lookup that hangs today now ends with an Incomplete result naming the
   provider that ran out of time.
 - **The result is unchanged in shape and order.** `LookupResult` is the same, and matches stay in record order.
 - **`AbstractGemProvider` gains no required member.** `DeadlineAwareGemProvider` is an additional interface, and
@@ -740,7 +781,8 @@ A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
   `GAL-discovery`; the class crosses the pipe by module and qualified name; a class that pickle cannot reference by
   name is handled as under option (a). The call returns within the deadline plus grace. The weaker part: a killed
   child that the operating system still holds is reported with `CHILD_LINGERING_REASON`, reaped once it exits,
-  and waited for at interpreter exit. Compatible, at the cost of a process per call, and values for `dig_gem`
+  and waited for at interpreter exit; a receiver thread that another process keeps waiting is reported with
+  `CHILD_RECEIVER_REASON`. Compatible, at the cost of a process per call, and values for `dig_gem`
   crossing a local pipe between the user's own processes; a value that pickle cannot send is handled per the child
   read decision below. Recommended: it keeps every registered provider usable.
 - A third option, running it without a bound, fails the gate, so it is not offered.
@@ -778,7 +820,8 @@ The read of a declared dotenv file on an unresponsive mount, which cannot be bou
   lookup. The return part of the contract always holds: the lookup returns within the deadline plus grace. The
   execution part holds except for a killed child that the operating system still holds in an uninterruptible
   wait: the lookup reports it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and
-  interpreter exit waits for it. A file on the home directory's own device is read in process, so the home
+  interpreter exit waits for it. A receiver thread that a process forked by the provider keeps waiting is
+  reported with `CHILD_RECEIVER_REASON`. A file on the home directory's own device is read in process, so the home
   directory is taken as responsive. Recommended: no lookup waits on an unresponsive mount, and a held child is
   reported rather than hidden.
 
@@ -858,11 +901,11 @@ In `tests/test_hidden_gems_routing.py`:
     ready. Its `Pipe` gives a receiving end whose `recv_bytes` blocks until the test releases it. A spy wraps
     `multiprocessing.active_children`.
   - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_LINGERING_REASON` within 0.2 seconds plus
-    `CHILD_EXIT_GATE_SECONDS`; `kill` was called; the exit is still unconfirmed when the call returns, and the
-    receiver thread is still blocked, so the return is not taken as a confirmed exit. After the test releases the
-    fake, the receiver thread ends, and a second `run_in_child` call calls `multiprocessing.active_children()` before
-    it starts its child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
-    `TIMEOUT_REASON` and a set `exitcode`.
+    `CHILD_EXIT_GATE_SECONDS`; `kill` was called exactly once; the exit is still unconfirmed when the call returns,
+    and the receiver thread is still blocked, so the return is not taken as a confirmed exit. After the test
+    releases the fake, the receiver thread ends, and a second `run_in_child` call calls
+    `multiprocessing.active_children()` before it starts its child. `test_non_cooperative_provider_never_runs_unbounded`
+    is the contrast: a real child gives `TIMEOUT_REASON` and a set `exitcode`.
 - `test_child_result_requires_confirmed_exit_before_return`, under non-cooperative option (b) or dotenv option (b).
   - Input: the fake context of the case above, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake
     writes one complete `RESULT` outcome into the sending end. The fake `Process` stays alive after `join` and
@@ -875,11 +918,41 @@ In `tests/test_hidden_gems_routing.py`:
   - Input: the fake context, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake writes only the
     frame header of a larger message into the sending end and keeps a duplicate of that end's descriptor open, so
     the receiving end blocks waiting for the body. The fake `Process` is alive until its `kill`, which closes the
-    duplicate, sets `exitcode`, and makes its sentinel ready.
-  - Expected: the fake recorded the header write before step 3 began; `run_in_child` raises `ProviderLookupError`
-    with `TIMEOUT_REASON` within 0.2 seconds plus `CHILD_EXIT_GATE_SECONDS`; afterwards no thread named
-    `CHILD_RECEIVER_THREAD_NAME` is alive. Revision 7, which called `recv_bytes` after a timed `poll`, would block in
-    `recv_bytes` here and fail this case.
+    duplicate, sets `exitcode`, and makes its sentinel ready. In a second run the fake `join(timeout)` waits out
+    its whole timeout before the exit becomes visible, so the process phase spends all of its half of the gate;
+    the receiver thread then pauses after the end of file arrives, for a quarter of `CHILD_EXIT_GATE_SECONDS`,
+    before it returns.
+  - Expected: the fake recorded the header write before step 3 began; in both runs `run_in_child` raises
+    `ProviderLookupError` with `TIMEOUT_REASON` within 0.2 seconds plus `CHILD_EXIT_GATE_SECONDS`, and afterwards no
+    thread named `CHILD_RECEIVER_THREAD_NAME` is alive. The second run passes only because the receiver phase keeps
+    its own half of the gate: with one shared gate, the process phase would leave the receiver no time, and the call
+    would raise `CHILD_RECEIVER_REASON`. Revision 7, which
+    called `recv_bytes` after a timed `poll`, would block in `recv_bytes` here; the test runs the call in a helper
+    thread joined with a bound, so such a regression fails instead of hanging.
+- `test_child_exit_does_not_imply_receiver_exit`, under non-cooperative option (b) or dotenv option (b).
+  - Input: the fake context of the case above, but its receiving end's `recv_bytes` keeps blocking after the fake
+    child exits (`exitcode` set, sentinel ready) until the test releases it, as when another process holds the pipe.
+  - Expected: `run_in_child` raises `ProviderLookupError` with `CHILD_RECEIVER_REASON`, not `TIMEOUT_REASON` or
+    `CHILD_LINGERING_REASON`, within 0.2 seconds plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`, so before the router's wait
+    for it ends. The receiver thread is still alive
+    when the call returns; after the test releases it, the thread ends and the receiving end is closed.
+- `test_run_in_child_with_an_expired_deadline_starts_no_child`.
+  - Input: the fake context and a deadline that has already expired.
+  - Expected: `ProviderLookupError` with `TIMEOUT_REASON`; the fake `Process.start` is never called.
+- `test_run_in_child_kills_the_child_on_an_early_exception`.
+  - Input: the fake context, with the receiver thread's `join` patched to raise `KeyboardInterrupt` in step 3.
+  - Expected: `KeyboardInterrupt` propagates; `kill` was called once, and `join` was called with no more than
+    `CHILD_EXIT_GATE_SECONDS`.
+- `test_child_exit_confirmed_by_the_sentinel_alone`.
+  - Input: the fake context, whose `Process.exitcode` stays `None` while its sentinel becomes ready at `kill`, as
+    when another reaper collected the child first; the receiving end reaches end of file at the same time.
+  - Expected: the exit counts as confirmed, and `run_in_child` raises `ProviderLookupError` with `TIMEOUT_REASON`,
+    not `CHILD_LINGERING_REASON`.
+- `test_router_reports_a_held_child_as_lingering`, under non-cooperative option (b).
+  - Input: `inspect_gem` with an `UNSUPPORTED` provider and the fake context of the held-child case, whose
+    `Process.join` waits out its whole timeout.
+  - Expected: `inspect_gem` returns within 0.2 seconds plus the grace, and the provider's `LookupIssue` carries
+    `CHILD_LINGERING_REASON`, not `TIMEOUT_REASON`.
 - `test_lookup_with_no_records_skips_the_pool`.
   - Input: `HiddenGems(providers=(), config_path=tmp_path / "missing.json")`.
   - Expected: `dig_gem` raises `GemNotFoundError`, as today, and no thread whose name starts with
