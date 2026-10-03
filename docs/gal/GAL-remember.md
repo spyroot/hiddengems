@@ -1,9 +1,18 @@
 # GAL-remember: remembered detection and provider invalidation
 
-Status: proposal, revision 4. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
 [Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate).
+
+Revision 5 applies the second round of shared decisions. Cases R1 to R4 use the test class
+`InvalidatingProvider`, and `FakeProvider` is unchanged. `GemProvider.revalidate` and
+`GemProvider.detection_environment` take the `types` that `HiddenGems.__init__` passes to
+`GemProvider.detect`. Without an installed distribution, `package_version` is `PACKAGE_VERSION_UNKNOWN` and
+nothing is remembered, so the baseline tests detect as today; case R17 covers it. The setting keys and the SDK
+module name that `revalidate` reads are constants. `canonical_json.py` and `CANONICAL_JSON_SEPARATORS` come from
+`GAL-chooser`. The behavior section states the relaxation of "The provider detector version changes", and the
+dependencies name the `GAL-remember` choices in the overview's Decision register.
 
 Revision 4 aligns this proposal with the other feature proposals. The default `revalidate` skips the
 `REMEMBERED` entry; without that rule no record was ever reused. `GemConfig` gains `remembered`, which
@@ -33,8 +42,8 @@ drop everything remembered, both the stored detection and any state a provider k
 call.
 
 - **Observable capability:**
-  - a second `HiddenGems` built with the same configuration, user, system, environment, and working directory
-    reuses the remembered records without calling `GemProvider.detect`;
+  - a second `HiddenGems` built with the same configuration, user, system, environment, working directory, and
+    installed package version reuses the remembered records without calling `GemProvider.detect`;
   - `HiddenGems(refresh=True)` detects again and replaces the remembered entry;
   - `HiddenGems.invalidate()` calls `invalidate()` on every provider instance, forgets the remembered entry,
     and detects again.
@@ -75,8 +84,6 @@ Added beyond the minimum, each needed by a rule of `docs/README.md`:
   directory would be wrong in another.
 - **`GemConfig.remembered` and the schema's `remembered` object,** because `GAL-targets` rejects unknown keys
   in `~/.gem_provider.json`, so the key that holds the remembered store must be declared.
-- **`canonical_json`,** the one JSON encoding that both fingerprint digests use. `GAL-secure-cache` uses it
-  too.
 
 Out of scope:
 
@@ -93,9 +100,7 @@ Out of scope:
 ```text
 ~ src/hiddengems/abstract_provider.py            invalidate, revalidate, environment_names; CachingGemProvider
 ~ src/hiddengems/abstraction.py                  RecordValidity, Revalidation
-+ src/hiddengems/canonical_json.py               canonical_json
 ~ src/hiddengems/config.py                       GemConfig.remembered
-~ src/hiddengems/constants/config.py             CANONICAL_JSON_SEPARATORS
 + src/hiddengems/constants/remember.py           the constants below
 + src/hiddengems/detection_cache.py              the remembered store
 ~ src/hiddengems/gem_provider.py                 GemProvider.revalidate, GemProvider.detection_environment
@@ -103,17 +108,20 @@ Out of scope:
 ~ src/hiddengems/schemas/gem-provider-config.schema.json  the remembered object
 ~ src/hiddengems/gems/dotenv_provider.py         environment_names
 ~ src/hiddengems/gems/k8s_provider.py            environment_names; revalidate
-~ src/hiddengems/gems/kubernetes_constants.py    revalidation reasons
+~ src/hiddengems/gems/kubernetes_constants.py    revalidation reasons; CONTEXT_SETTING
 ~ src/hiddengems/gems/keyring_provider.py        environment_names; revalidate
+~ src/hiddengems/gems/keychain_constants.py      LIBRARY_SETTING
 ~ src/hiddengems/gems/onepassword_provider.py    environment_names; revalidate
+~ src/hiddengems/gems/onepassword_constants.py   SDK_INSTALLED_SETTING, ONEPASSWORD_SDK_MODULE
 ~ tests/contract/example_providers.py            CachingEnvironmentProvider
 ~ tests/contract/test_provider_contract.py       contract cases C1 to C9
-~ tests/test_hidden_gems_routing.py              FakeProvider.invalidate; cases R1 to R16, F1, F2, K1, K2, O1
+~ tests/test_hidden_gems_routing.py              InvalidatingProvider; cases R1 to R17, F1, F2, K1, K2, O1
 ~ tests/test_hidden_gems_dotenv.py               case D1
 ~ tests/test_hidden_gems_keyring.py              case Y1
 ```
 
-`kubernetes_constants.py` is created by `GAL-settings` (plan 2.2); this feature adds two constants to it.
+`kubernetes_constants.py`, `keychain_constants.py`, and `onepassword_constants.py` are created by `GAL-settings`
+(plan 2.2); this feature adds the constants listed under [Constants](#constants) to them.
 `constants/remember.py` is created by this feature.
 
 ## Abstraction-extension gate
@@ -205,26 +213,29 @@ names are listed under [Acceptance cases](#acceptance-cases).
 
 #### `GemProvider.revalidate`
 
-- **Signature:** `@classmethod def revalidate(cls, record: DetectedProvider) -> Revalidation`.
-- **Behavior:** finds the class in `provider_types` whose `name` equals `record.provider`, by the same lookup
-  `GemProvider.create` uses, and returns that class's `revalidate(record)`. A provider that is no longer
-  registered gives `Revalidation(RecordValidity.INVALID, EvidenceSource.REMEMBERED,
-  REVALIDATION_NOT_REGISTERED)`. A registered class that does not subclass `AbstractGemProvider` is outside
-  `B` and gives `Revalidation(RecordValidity.UNKNOWN, EvidenceSource.REMEMBERED,
-  REVALIDATION_NOT_A_PROVIDER)`, so its records are never reused.
+- **Signature:** `@classmethod def revalidate(cls, record: DetectedProvider, *,
+  types: Sequence[type] | None = None) -> Revalidation`.
+- **Behavior:** finds the class whose `name` equals `record.provider` in `types`, or in `provider_types` when
+  `types` is `None`, by the same lookup `GemProvider.create` uses, and returns that class's
+  `revalidate(record)`. A provider that is no longer registered gives `Revalidation(RecordValidity.INVALID,
+  EvidenceSource.REMEMBERED, REVALIDATION_NOT_REGISTERED)`. A registered class that does not subclass
+  `AbstractGemProvider` is outside `B` and gives `Revalidation(RecordValidity.UNKNOWN,
+  EvidenceSource.REMEMBERED, REVALIDATION_NOT_A_PROVIDER)`, so its records are never reused.
 - **Implementation owner:** `GemProvider` in `gem_provider.py`.
-- **Actual caller:** `HiddenGems.__init__`, step 3.
+- **Actual caller:** `HiddenGems.__init__`, step 3, with the `types` it passes to `GemProvider.detect`.
 - **Acceptance tests:** F1, R8.
 
 #### `GemProvider.detection_environment`
 
-- **Signature:** `@classmethod def detection_environment(cls) -> dict[str, str]`.
+- **Signature:** `@classmethod def detection_environment(cls, *, types: Sequence[type] | None = None) ->
+  dict[str, str]`.
 - **Behavior:** returns the current value of each name in the union of `environment_names` over the classes
-  in `provider_types` that subclass `AbstractGemProvider`, for the names that are set, with keys in sorted
-  order. A registered class that does not subclass `AbstractGemProvider` contributes no names. An unset
-  variable is left out, and an empty value is kept.
+  in `types`, or in `provider_types` when `types` is `None`, that subclass `AbstractGemProvider`, for the
+  names that are set, with keys in sorted order. A registered class that does not subclass
+  `AbstractGemProvider` contributes no names. An unset variable is left out, and an empty value is kept.
 - **Implementation owner:** `GemProvider` in `gem_provider.py`.
-- **Actual caller:** `HiddenGems.__init__`, step 2, to build the fingerprint.
+- **Actual caller:** `HiddenGems.__init__`, step 2, to build the fingerprint, with the `types` it passes to
+  `GemProvider.detect`.
 - **Acceptance tests:** F2, R7.
 
 #### `RecordValidity` and `Revalidation`
@@ -245,21 +256,24 @@ names are listed under [Acceptance cases](#acceptance-cases).
 - **Behavior:**
   1. With `providers` given, nothing changes: the remembered store is neither read nor written.
   2. Otherwise `__init__` keeps the `detection_options` it builds today, then builds
-     `fingerprint = current_fingerprint(detection_options, GemProvider.detection_environment())`. In either
-     case it stores the resolved configuration path as `self._config_path: Path`, which `invalidate` step 2
-     uses.
+     `fingerprint = current_fingerprint(detection_options, GemProvider.detection_environment(types=types))`,
+     where `types` is the sequence of provider classes it passes to `GemProvider.detect` (`GAL-discovery`). In
+     either case it stores the resolved configuration path as `self._config_path: Path`, which `invalidate`
+     step 2 uses.
   3. With `refresh=False`, it calls `load_remembered(config.remembered, fingerprint, now=now,
      lifetime=lifetime)`, where `config` is the `GemConfig` that `load_config` returned,
      `now = datetime.now(timezone.utc)`, computed once per construction, and
      `lifetime = timedelta(seconds=DETECTION_LIFETIME_SECONDS)`. If the status is `CURRENT` and
-     `GemProvider.revalidate` returns `VALID` for every record, those records become `self.records`.
-  4. In every other case it detects with `GemProvider.detect(**detection_options)`, as today, and then calls
-     `save_remembered(self._config_path, records, fingerprint, now=now)`, with the same `now` as step 3.
+     `GemProvider.revalidate(record, types=types)` returns `VALID` for every record, those records become
+     `self.records`.
+  4. In every other case it detects with `GemProvider.detect(**detection_options, types=types)`, unchanged from
+     `GAL-discovery`, and then calls `save_remembered(self._config_path, records, fingerprint, now=now)`, with
+     the same `now` as step 3.
   5. An `OSError` from `save_remembered` becomes a `RememberedStoreWarning` whose `path` is
      `self._config_path` and whose `cause` is the error class name. The detected records are used as usual.
 - **Implementation owner:** `HiddenGems`.
 - **Actual caller:** the caller of the library.
-- **Acceptance tests:** R5 to R15.
+- **Acceptance tests:** R5 to R15, R17.
 
 #### `HiddenGems.invalidate`
 
@@ -270,11 +284,11 @@ names are listed under [Acceptance cases](#acceptance-cases).
      `TypeError(NOT_A_PROVIDER_MESSAGE.format(provider_class=type(instance).__qualname__))` to the collected
      errors and continues. The `isinstance` check is a declared type check, not a `getattr` fallback.
   2. Calls `forget_remembered(self._config_path)`.
-  3. When the records came from detection, it detects again with the stored detection options, then rebuilds
-     `records`, `_unavailable`, and `_states`. It keeps the existing instance of every new record that has the
-     same `provider`, `instance_id`, and `settings`, and creates the other instances through
-     `GemProvider.create`. It then saves the new records as in `__init__`. Caller-given records are kept, but
-     their instances are still invalidated in step 1.
+  3. When the records came from detection, it detects again with the stored detection options and `types`,
+     then rebuilds `records`, `_unavailable`, and `_states`. It keeps the existing instance of every new record
+     that has the same `provider`, `instance_id`, and `settings`, and creates the other instances through
+     `GemProvider.create` with the same `types`. It then saves the new records as in `__init__`. Caller-given
+     records are kept, but their instances are still invalidated in step 1.
   4. It runs every step, collecting each exception. After step 3 it raises
      `ExceptionGroup(INVALIDATION_FAILED_MESSAGE.format(count=len(errors)), errors)` if any step failed. If
      detection fails, `records`, `_instances`, `_states`, and `_unavailable` stay as they were.
@@ -310,22 +324,26 @@ names are listed under [Acceptance cases](#acceptance-cases).
 - **Behavior:**
   - `current_fingerprint` takes `system` from `platform.system()`, `user` from `getpass.getuser()`,
     `working_directory` from `str(Path.cwd().resolve())`, and `package_version` from
-    `importlib.metadata.version(BUILTIN_DISTRIBUTION)`. Each digest is the SHA-256 hex digest of
-    `canonical_json(value)`.
+    `importlib.metadata.version(BUILTIN_DISTRIBUTION)`, or `PACKAGE_VERSION_UNKNOWN` when that raises
+    `importlib.metadata.PackageNotFoundError`, as it does when the package is imported from `src/` (the
+    `pythonpath` of `pyproject.toml`). Each digest is the SHA-256 hex digest of `canonical_json(value)`.
   - `load_remembered` never raises for the content of `remembered`, the value of `GemConfig.remembered`:
     - an empty mapping gives `ABSENT`;
     - a value of the wrong shape gives `UNREADABLE`;
     - a `format` other than `REMEMBERED_FORMAT` gives `STALE` with `FORMAT_CHANGED`;
     - otherwise each differing fingerprint field adds its reason, and `now - observed_at > lifetime` adds
-      `LIFETIME_EXCEEDED`. Reasons follow the order of `StaleReason`. No reason gives `CURRENT`.
+      `LIFETIME_EXCEEDED`. A `fingerprint` whose `package_version` is `PACKAGE_VERSION_UNKNOWN` always adds
+      `VERSION_CHANGED`, so it never gives `CURRENT`. Reasons follow the order of `StaleReason`. No reason
+      gives `CURRENT`.
     - `records` is filled only for `CURRENT`, and each record gains one evidence entry,
       `DetectionEvidence(EvidenceSource.REMEMBERED, REMEMBERED_EVIDENCE_DESCRIPTION, None, observed_at)`.
-  - `save_remembered` writes nothing, and emits `RememberedStoreWarning`, when any record carries `scan_issue`
-    in its settings, because an incomplete detection is never remembered. It does the same when a setting
-    cannot be encoded. Otherwise it holds `atomic_file.exclusive_write_lock(path)`, reads the file again,
-    sets only `REMEMBERED_KEY`, and replaces the file through
-    `atomic_file.rewrite_file(path, contents, mode=CONFIG_FILE_MODE)`. Every other key is kept. A missing file
-    is created with `CONFIG_FILE_MODE`.
+  - `save_remembered` writes nothing, and emits no warning, when the `package_version` of `fingerprint` is
+    `PACKAGE_VERSION_UNKNOWN`, so a run from `src/` detects as today and writes no file. It writes nothing, and
+    emits `RememberedStoreWarning`, when any record carries `SCAN_ISSUE_SETTING` in its settings, because an
+    incomplete detection is never remembered. It does the same when a setting cannot be encoded. Otherwise it
+    holds `atomic_file.exclusive_write_lock(path)`, reads the file again, sets only `REMEMBERED_KEY`, and
+    replaces the file through `atomic_file.rewrite_file(path, contents, mode=CONFIG_FILE_MODE)`. Every other
+    key is kept. A missing file is created with `CONFIG_FILE_MODE`.
   - **Encoding:** `str`, `int`, `float`, `bool`, `None`, `list`, and `dict` with `str` keys are stored as JSON.
     `Path` becomes `{PATH_TAG: "<str>"}`, `tuple` becomes `{TUPLE_TAG: [...]}`, and `datetime` becomes
     `{DATETIME_TAG: "<ISO 8601>"}`, with the tags from `constants/remember.py`. Decoding restores the same
@@ -333,11 +351,15 @@ names are listed under [Acceptance cases](#acceptance-cases).
   - `forget_remembered` removes `REMEMBERED_KEY` under the same lock. A missing file or key is not an error.
 - **Implementation owner:** `detection_cache.py`.
 - **Actual caller:** `HiddenGems.__init__` and `HiddenGems.invalidate`.
-- **Acceptance tests:** R5 to R15.
+- **Acceptance tests:** R5 to R15, R17.
 
 `save_remembered` and `forget_remembered` use `atomic_file.exclusive_write_lock` and
 `atomic_file.rewrite_file(path, contents, mode=CONFIG_FILE_MODE)` from `GAL-chooser` (plan 4.3), which
 creates `atomic_file.py`. This feature neither creates nor moves them.
+
+`current_fingerprint` uses `canonical_json` from `GAL-chooser` (plan 4.3), which creates `canonical_json.py`
+and adds `CANONICAL_JSON_SEPARATORS` to `constants/config.py`. This feature imports `canonical_json` and
+`CANONICAL_JSON_SEPARATORS` and creates neither.
 
 #### `GemConfig.remembered`
 
@@ -352,15 +374,6 @@ creates `atomic_file.py`. This feature neither creates nor moves them.
 - **Actual caller:** `HiddenGems.__init__`, step 3, which passes `config.remembered` to `load_remembered`.
 - **Acceptance tests:** R5, R10.
 
-#### `canonical_json`
-
-- **Signature:** `def canonical_json(value: object) -> str`, in the new module `src/hiddengems/canonical_json.py`.
-- **Behavior:** returns `json.dumps(value, sort_keys=True, separators=CANONICAL_JSON_SEPARATORS, default=str)`.
-  Equal values give equal text, whatever the key order.
-- **Implementation owner:** `canonical_json.py`.
-- **Actual caller:** `current_fingerprint`, for `config_digest` and `environment_digest`; `GAL-secure-cache`.
-- **Acceptance tests:** R7, R15.
-
 ### 2. What each extension extends
 
 - `invalidate`, `revalidate`, and `environment_names` extend `AbstractGemProvider` with defaults. No member of
@@ -370,16 +383,25 @@ creates `atomic_file.py`. This feature neither creates nor moves them.
 - `GemProvider.revalidate` and `GemProvider.detection_environment` extend the existing factory. No other code
   dispatches on a provider's class or name.
 - `GemConfig.remembered` extends the `GemConfig` of `GAL-targets`, and the configuration schema gains the
-  `remembered` object. `canonical_json.py` is a new module and extends nothing.
+  `remembered` object.
 
 ### 3. Providers in P
 
-| Provider | Applicable contract | `environment_names` | `invalidate` | `revalidate` |
-| --- | --- | --- | --- | --- |
-| `OnePasswordProvider` | `AbstractGemProvider` with this feature's Δ | listed below | inherited no-op | override |
-| `DotEnvProvider` | `AbstractGemProvider` with this feature's Δ | listed below | inherited no-op | inherited default |
-| `KeyringProvider` | `AbstractGemProvider` with this feature's Δ | listed below | inherited no-op | override |
-| `KubernetesProvider` | `AbstractGemProvider` with this feature's Δ | listed below | inherited no-op | override |
+| Provider | `environment_names` | `invalidate` | `revalidate` |
+| --- | --- | --- | --- |
+| `OnePasswordProvider` | listed below | inherited no-op | override |
+| `DotEnvProvider` | listed below | inherited no-op | inherited default |
+| `KeyringProvider` | listed below | inherited no-op | override |
+| `KubernetesProvider` | listed below | inherited no-op | override |
+
+- **Applicable contract,** `C` restricted to the classes each provider subclasses; in `C`, `AbstractGemProvider`
+  includes this feature's `invalidate`, `revalidate`, and `environment_names`:
+  - `OnePasswordProvider` and `KubernetesProvider`: `AbstractGemProvider`, `DeadlineAwareGemProvider`;
+  - `DotEnvProvider`: `AbstractGemProvider`, `WritableGemProvider`, `DeadlineAwareGemProvider`;
+  - `KeyringProvider`: `AbstractGemProvider`, and `DeadlineAwareGemProvider` under Keychain option (a) of
+    `GAL-parallel`.
+
+  Under `GAL-plugin` option one, `WritableGemProvider` does not exist, and no provider subclasses it.
 
 - **`invalidate`:** each of the four inherits the no-op, which is correct because each holds no state across
   calls. Their instance attributes are assigned only in `__init__`: `onepassword_provider.py:85-88`,
@@ -398,31 +420,34 @@ creates `atomic_file.py`. This feature neither creates nor moves them.
     variables;
   - `KubernetesProvider`: `HOME`, `KUBECONFIG`, and `USERPROFILE`.
 - **`revalidate` overrides:**
-  - `KubernetesProvider`: the default first. When it gives `VALID` and `record.settings["context"]` is a
+  - `KubernetesProvider`: the default first. When it gives `VALID` and `record.settings[CONTEXT_SETTING]` is a
     string, it parses the kubeconfig with `_kubeconfig_document(path, {})` (`k8s_provider.py:274-285`). No
     document gives `UNKNOWN` with `REVALIDATION_KUBECONFIG_UNREADABLE`. A context name missing from its
     `contexts` list gives `INVALID` with `REVALIDATION_CONTEXT_GONE`. Otherwise the result is `VALID`.
-  - `KeyringProvider`: `VALID` when `_NativeKeychain(record.settings["library"])` loads, the same check
+  - `KeyringProvider`: `VALID` when `_NativeKeychain(record.settings[LIBRARY_SETTING])` loads, the same check
     `detect()` makes (`keyring_provider.py:146-150`). `AttributeError` or `OSError` gives `INVALID` with
     `REVALIDATION_LIBRARY_GONE`. This covers the record found through `ctypes.util.find_library`, which has no
     path.
   - `OnePasswordProvider`: `VALID` when every CLI evidence path passes `_is_executable`
-    (`onepassword_provider.py:178-192`) and, if `record.settings["sdk_installed"]` is true,
-    `find_spec("onepassword")` finds the module. A failed CLI check gives `INVALID` with
+    (`onepassword_provider.py:178-192`) and, if `record.settings[SDK_INSTALLED_SETTING]` is true,
+    `find_spec(ONEPASSWORD_SDK_MODULE)` finds the module. A failed CLI check gives `INVALID` with
     `REVALIDATION_PATH_GONE`; a missing SDK gives `INVALID` with `REVALIDATION_SDK_GONE`.
   - `DotEnvProvider` inherits the default. Its evidence path is the dotenv file (`dotenv_provider.py:460-464`).
 
 ### 4. Baseline tests whose expectations change
 
-None. Two baseline tests detect without caller records, and both keep their expectations:
+None. Two baseline tests detect without caller records, and both keep their expectations. Both run from `src/`
+(the `pythonpath` of `pyproject.toml`), so their fingerprint carries `PACKAGE_VERSION_UNKNOWN`: detection runs
+once, as today, and no file is written.
 
-- `test_empty_config_detects_conventional_dotenv_and_resolves_key` gains a `remembered` key in its temporary
-  `gem_provider.json`. It builds one `HiddenGems`, so detection still runs once.
-- `test_detection_runs_once_and_list_valued_gem_stays_nested` gains a `missing.json` in its `tmp_path`. Its
-  one record has no evidence, so it is never reused, and `len(calls) == 1` still holds.
+- `test_empty_config_detects_conventional_dotenv_and_resolves_key` builds one `HiddenGems`, and its temporary
+  `gem_provider.json` is not rewritten.
+- `test_detection_runs_once_and_list_valued_gem_stays_nested` builds one `HiddenGems`, no `missing.json` is
+  written to its `tmp_path`, and `len(calls) == 1` still holds.
 
-`FakeProvider` gains an `invalidate(self) -> None` method and an optional `invalidate_error` argument. Both are
-additions that no baseline test calls.
+`InvalidatingProvider` is a test subclass of `AbstractGemProvider` in `tests/test_hidden_gems_routing.py` that
+records each `invalidate()` call and raises an optional `invalidate_error`. Cases R1 to R4 use it.
+`FakeProvider` is unchanged and is the instance outside the contract in case R16, so no baseline test changes.
 
 ### 5. Baseline
 
@@ -436,7 +461,9 @@ One new class, and four reuses, under the overview's exception rules. This featu
 
 - **New: `RememberedStoreWarning(UserWarning)`,** in `detection_cache.py`.
   - Emitted when the remembered entry cannot be saved, or is deliberately not saved: an `OSError` on write, a
-    `scan_issue` record, or a setting that cannot be encoded. Construction continues with the detected records.
+    record that carries `SCAN_ISSUE_SETTING`, or a setting that cannot be encoded. Nothing is saved for a
+    fingerprint with `PACKAGE_VERSION_UNKNOWN` either, and no warning is emitted. Construction continues with
+    the detected records.
   - Needed because a caller, or a test, must filter this warning without matching its text. Remembered
     detection is an optimization; losing it must never fail a lookup, so it is a warning and not an error.
   - Closest existing classes: none in `E_B` is a warning. Plain `UserWarning` cannot be filtered apart from other
@@ -462,6 +489,8 @@ One new class, and four reuses, under the overview's exception rules. This featu
 - `REMEMBERED_KEY: Final[str] = "remembered"`, the key this feature chooses inside `~/.gem_provider.json`, the
   file `docs/README.md` allows to remember detection;
 - `REMEMBERED_FORMAT: Final[int] = 1`;
+- `PACKAGE_VERSION_UNKNOWN: Final[str] = "unknown"`, the `package_version` when `BUILTIN_DISTRIBUTION` is not
+  installed;
 - `REMEMBERED_EVIDENCE_DESCRIPTION: Final[str] = "Remembered from an earlier detection"`;
 - `REMEMBERED_STORE_WARNING: Final[str] = "Remembered detection not saved to {path}: {cause}"`;
 - `PATH_TAG: Final[str] = "$path"`, `TUPLE_TAG: Final[str] = "$tuple"`, and
@@ -476,21 +505,28 @@ One new class, and four reuses, under the overview's exception rules. This featu
 - `REVALIDATION_LIBRARY_GONE: Final[str] = "Remembered native library no longer loads"`;
 - `REVALIDATION_SDK_GONE: Final[str] = "Remembered Python SDK is no longer importable"`;
 - `REVALIDATION_NOT_A_PROVIDER: Final[str] = "Remembered provider class does not subclass AbstractGemProvider"`;
-- `NOT_A_PROVIDER_MESSAGE: Final[str] = "{provider_class} does not subclass AbstractGemProvider and has no
-  invalidate"`.
+- `NOT_A_PROVIDER_MESSAGE: Final[str] = "{provider_class} does not subclass AbstractGemProvider, so its invalidate
+  is not called"`.
 
 `src/hiddengems/gems/kubernetes_constants.py`, created by `GAL-settings` (plan 2.2):
 
 - `REVALIDATION_CONTEXT_GONE: Final[str] = "Remembered context is no longer in the kubeconfig"`;
-- `REVALIDATION_KUBECONFIG_UNREADABLE: Final[str] = "Remembered kubeconfig could not be read"`.
+- `REVALIDATION_KUBECONFIG_UNREADABLE: Final[str] = "Remembered kubeconfig could not be read"`;
+- `CONTEXT_SETTING: Final[str] = "context"`.
 
-`src/hiddengems/constants/config.py`, created by `GAL-settings` (plan 2.2):
+`src/hiddengems/gems/keychain_constants.py`, created by `GAL-settings` (plan 2.2):
 
-- `CANONICAL_JSON_SEPARATORS: Final[tuple[str, str]] = (",", ":")`, added by this feature for
-  `canonical_json`.
+- `LIBRARY_SETTING: Final[str] = "library"`.
+
+`src/hiddengems/gems/onepassword_constants.py`, created by `GAL-settings` (plan 2.2):
+
+- `SDK_INSTALLED_SETTING: Final[str] = "sdk_installed"`;
+- `ONEPASSWORD_SDK_MODULE: Final[str] = "onepassword"`.
 
 `BUILTIN_DISTRIBUTION` is added to `constants/config.py` by `GAL-discovery` (plan 2.4); this feature imports
-it. `CONFIG_FILE_MODE` is added to `constants/config.py` by `GAL-chooser` (plan 4.3); this feature imports it.
+it. `CONFIG_FILE_MODE` and `CANONICAL_JSON_SEPARATORS` are added to `constants/config.py` by `GAL-chooser`
+(plan 4.3); this feature imports them. `SCAN_ISSUE_SETTING` is added to `constants/config.py` by `GAL-expand`
+(plan 3.2); this feature imports it.
 
 ## Libraries
 
@@ -508,7 +544,8 @@ standard library.
 - **Behavior change: `HiddenGems` writes the config file.** Without caller records, construction adds or
   replaces the `remembered` key of `~/.gem_provider.json`, creating the file with `CONFIG_FILE_MODE`
   (`constants/config.py`, `GAL-chooser`) when missing. `docs/README.md` allows this file to remember
-  detection. Every other key is kept.
+  detection. Every other key is kept. A run from `src/` without an installed distribution writes nothing
+  (`PACKAGE_VERSION_UNKNOWN`).
 - **Behavior change: a later `HiddenGems` may not call `detect()`.** It does so only while the fingerprint
   matches, the lifetime has not passed, and every record revalidates `VALID`. Remembered evidence stays the
   weakest source, as `docs/README.md` requires: a record that fails revalidation is never reported as
@@ -517,6 +554,9 @@ standard library.
   is reused, detection does not run, so an instance created after the entry was saved is not returned until
   `refresh=True`, a fingerprint change, or `DETECTION_LIFETIME_SECONDS`; a gem duplicated only in such an
   instance resolves as Single. A record that fails revalidation is never reported as available.
+- **Relaxation of `docs/README.md` "The provider detector version changes".** The fingerprint holds only the
+  version of `BUILTIN_DISTRIBUTION`; an upgraded third-party provider is seen after `refresh=True`, a
+  configuration change, or `DETECTION_LIFETIME_SECONDS`.
 - **A different working directory detects again,** and replaces the one remembered entry.
 - **Gates:** unchanged.
 
@@ -543,7 +583,9 @@ standard library.
 ## Acceptance cases
 
 Every case uses `tmp_path` and a patched home directory, never the real `~/.gem_provider.json`. No case reads a
-real secret. None has been run, because nothing is implemented.
+real secret. None has been run, because nothing is implemented. Cases R1 to R4 use `InvalidatingProvider`.
+Cases R5 to R15 patch `importlib.metadata.version` to return a fixed value, because a run from `src/` never
+remembers.
 
 `tests/contract/test_provider_contract.py`, extending the kit of `GAL-plugin`:
 
@@ -586,7 +628,8 @@ real secret. None has been run, because nothing is implemented.
 - **R7** `test_each_fingerprint_change_marks_the_entry_stale`, parametrized over the members of `StaleReason`,
   each produced by changing one input.
 - **R8** `test_one_record_failing_revalidation_forces_live_detection`.
-- **R9** `test_incomplete_detection_is_not_remembered`: a detection with a `scan_issue` record writes nothing.
+- **R9** `test_incomplete_detection_is_not_remembered`: a detection with a record that carries
+  `SCAN_ISSUE_SETTING` writes nothing.
 - **R10** `test_unreadable_entry_detects_live_and_overwrites`.
 - **R11** `test_store_keeps_other_keys_and_file_mode`: `providers` and `preferences` survive the write, and the
   file mode is `CONFIG_FILE_MODE`.
@@ -597,11 +640,16 @@ real secret. None has been run, because nothing is implemented.
 - **R14** `test_unserializable_settings_are_not_remembered`: a callable in settings writes nothing and warns.
 - **R15** `test_remembered_records_round_trip_equal`: records from all four built-in `detect()` methods, on
   recorded inputs, compare equal after a save and a load.
-- **R16** `test_invalidate_reports_an_instance_outside_the_contract`.
-- **F1** `test_factory_revalidate_dispatches_by_provider_name_and_reports_unregistered`: a registered built-in is
-  dispatched to its class; an unregistered name gives `INVALID` with `REVALIDATION_NOT_REGISTERED`; a registered
-  class that does not subclass `AbstractGemProvider` gives `UNKNOWN` with `REVALIDATION_NOT_A_PROVIDER`.
-- **F2** `test_factory_detection_environment_lists_only_set_declared_names`.
+- **R16** `test_invalidate_reports_an_instance_outside_the_contract`: a `FakeProvider` instance adds one
+  `TypeError` with `NOT_A_PROVIDER_MESSAGE` to the raised `ExceptionGroup`.
+- **R17** `test_uninstalled_package_never_remembers`: with `importlib.metadata.version` raising
+  `PackageNotFoundError`, two constructions detect twice and write nothing.
+- **F1** `test_factory_revalidate_dispatches_by_provider_name_and_reports_unregistered`: a registered built-in,
+  and a class passed only through `types`, are each dispatched to their class; an unregistered name gives
+  `INVALID` with `REVALIDATION_NOT_REGISTERED`; a registered class that does not subclass `AbstractGemProvider`
+  gives `UNKNOWN` with `REVALIDATION_NOT_A_PROVIDER`.
+- **F2** `test_factory_detection_environment_lists_only_set_declared_names`, including the names of a class
+  passed only through `types`.
 - **K1** `test_kubernetes_revalidate_reports_a_removed_context_invalid`: the kubeconfig file still exists.
 - **K2** `test_kubernetes_revalidate_reports_an_unreadable_kubeconfig_unknown`.
 - **O1** `test_onepassword_revalidate_checks_cli_and_sdk_evidence`.
@@ -619,8 +667,12 @@ real secret. None has been run, because nothing is implemented.
 
 - **Blocked by:**
   - `GAL-plugin` (plan 2.1), whose `tests/contract/` kit and example providers this feature extends;
-  - `GAL-settings` (plan 2.2), which creates `constants/config.py` and `kubernetes_constants.py`;
-  - `GAL-discovery` (plan 2.4), which adds `BUILTIN_DISTRIBUTION`;
+  - `GAL-settings` (plan 2.2), which creates `constants/config.py`, `kubernetes_constants.py`,
+    `keychain_constants.py`, and `onepassword_constants.py`;
+  - `GAL-discovery` (plan 2.4), which adds `BUILTIN_DISTRIBUTION` and the factory's `types` parameter;
   - `GAL-targets` (plan 3.1), whose `load_config` and schema this feature extends;
-  - `GAL-chooser` (plan 4.3), for `atomic_file.py` and `CONFIG_FILE_MODE`.
-- **Used by:** `GAL-secure-cache`, which adds a step to `HiddenGems.invalidate` and uses `canonical_json`.
+  - `GAL-expand` (plan 3.2), for `SCAN_ISSUE_SETTING`;
+  - `GAL-chooser` (plan 4.3), for `atomic_file.py`, `canonical_json.py`, `CONFIG_FILE_MODE`, and
+    `CANONICAL_JSON_SEPARATORS`;
+  - and the `GAL-remember` choices in the overview's Decision register.
+- **Used by:** `GAL-secure-cache`, which adds a step to `HiddenGems.invalidate`.
