@@ -1,16 +1,20 @@
 # GAL-plugin: provider contract and writable capability
 
-Status: proposal, revision 4. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
 writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
 
-Revision 4 adds four things:
+Revision 5 adds three things:
 
-- the contributor contract, today's and the proposed one, in one table;
-- a complete worked example: a read-only provider and its writable variant;
-- write capability reported as SUPPORTED, UNSUPPORTED, or UNKNOWN, with the `EvidenceSource` it rests on and
-  never as `None`;
-- an exact before-and-after list of what this feature adds.
+- the [Abstraction-extension gate](#abstraction-extension-gate) section, declaring each extension's signature,
+  behavior, implementation owner, actual caller, and acceptance tests;
+- `get_gem` keeps the error behavior of the baseline. A uniform error for a location that is gone is the
+  proposed feature `GAL-read-errors`, presented under [Alternatives](#alternatives-for-the-owners-decision);
+- `write_capability` resolves `put_gem` through the method resolution order, so an inherited legacy writer is
+  `UNKNOWN`, with its own acceptance case.
+
+Revision 4 added the contributor contract table, the worked example, write capability with its evidence, and
+the before-and-after list.
 
 It names, with their owners, the obligations that belong to other features: a runtime check of provider
 returns, keeping every found location as a candidate, and the caller's exact choice. Revision 3's correction
@@ -62,7 +66,16 @@ Signatures, results, errors, and lifecycle:
   - `ProviderLookupError(reason, next_action, matches)`: the instance could not be checked. Partial matches
     are kept in `matches`; this is never a claim of absence.
 - **`get_gem(self, reference: GemReference) -> list[Gem]`.** Returns the values at one reference, a single value
-  as a one-item list. Raises `ProviderLookupError` if the location is gone.
+  as a one-item list. `B` defines no error for a location that is gone, and this feature adds none. At
+  `4438234` the built-ins differ:
+  - `DotEnvProvider` and `KeyringProvider` raise `ProviderLookupError` (`dotenv_provider.py:661-680`,
+    `keyring_provider.py:197-215`);
+  - `KubernetesProvider` lets `KeyError` escape for a removed key, and the client's exception for a removed
+    Secret (`k8s_provider.py:596-602`);
+  - `OnePasswordProvider` raises `ProviderLookupError` on the CLI path and lets the SDK's exception escape on
+    the SDK path (`onepassword_provider.py:457-488`).
+
+  The worked example below raises `ProviderLookupError`, which `B` allows and does not require.
 - **`put_gem(self, name: str, value: Gem, *, criteria: Mapping[str, Any] | None = None, dry_run: bool = False)
   -> GemReference`.** Stores `value` as `name` and returns non-secret metadata. With `dry_run`, it validates and
   plans the write without persisting it. It never prints the value or puts it in the reference.
@@ -236,11 +249,23 @@ Option two changes these files. Option one changes none.
   abstract method, decorated with `@abstractmethod`, has the exact `put_gem` signature removed from the base.
   Errors are unchanged: this moves the method and changes no implementation of it.
 - **New: `write_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation`.** Never returns
-  `None`. Its source is always `EvidenceSource.PROVIDER_CLASS`, because it reads only the class:
-  - a subclass of `WritableGemProvider` gives `SUPPORTED`, reason "Subclasses WritableGemProvider";
-  - a class that defines a callable `put_gem` without that base gives `UNKNOWN`, reason "Defines put_gem without
-    declaring WritableGemProvider", because a defined method does not show that it stores anything;
-  - any other class gives `UNSUPPORTED`, reason "Does not declare WritableGemProvider".
+  `None`. Its source is always `EvidenceSource.PROVIDER_CLASS`, because it reads only the class. The rules
+  apply in this order:
+  1. `provider_type` that is not a class, or not a subclass of `AbstractGemProvider`, raises `TypeError` with
+     `WRITE_CAPABILITY_INPUT_ERROR`;
+  2. a subclass of `WritableGemProvider` gives `SUPPORTED`, with `WRITE_SUPPORTED_REASON`;
+  3. a class on which `inspect.getattr_static(provider_type, "put_gem", _MISSING)` finds a callable gives
+     `UNKNOWN`, with `WRITE_LEGACY_REASON`. The lookup follows the method resolution order, so a `put_gem`
+     the class inherits counts the same as one it defines. A method alone does not show that the class stores
+     anything;
+  4. any other class gives `UNSUPPORTED`, with `WRITE_UNSUPPORTED_REASON`.
+
+  `_MISSING` is a module-private `object()` sentinel, so the lookup never uses `None`. The reasons are
+  `Final[str]` constants in `abstract_provider.py`:
+  - `WRITE_SUPPORTED_REASON = "Subclasses WritableGemProvider"`;
+  - `WRITE_LEGACY_REASON = "Resolves put_gem without subclassing WritableGemProvider"`;
+  - `WRITE_UNSUPPORTED_REASON = "Does not subclass WritableGemProvider and resolves no put_gem"`;
+  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs an AbstractGemProvider subclass, not {value!r}"`.
 
   A structural `typing.Protocol` with `runtime_checkable` is rejected, because it reports any object with a
   `put_gem` attribute as writable, including a stub that only raises.
@@ -281,6 +306,110 @@ Option two changes these files. Option one changes none.
 - **Built-in transitions:**
   - `DotEnvProvider` subclasses `WritableGemProvider`; `put_gem` is unchanged.
   - `KubernetesProvider`, `OnePasswordProvider`, and `KeyringProvider` lose their stubs and stay read-only.
+
+## Abstraction-extension gate
+
+This section follows the [gate](../provider-routing-design.md#abstraction-extension-gate) of the overview. The
+baseline is commit `4438234`.
+
+### 1. Extensions
+
+#### Removal of `AbstractGemProvider.put_gem`
+
+- **Signature:** `put_gem(self, name: str, value: Gem, *, criteria: Mapping[str, Any] | None = None,
+  dry_run: bool = False) -> GemReference` leaves `AbstractGemProvider` and becomes the one abstract member of
+  `WritableGemProvider`, with the same signature and the same docstring obligation.
+- **Status:** MUST for a provider that stores gems; absent from every other provider.
+- **Behavior:** unchanged for every writer. `DotEnvProvider.put_gem` (`dotenv_provider.py:681`) is not changed.
+- **Implementation owner:** `abstract_provider.py`. The stubs at `k8s_provider.py:610-625`,
+  `onepassword_provider.py:489-498`, and `keyring_provider.py:216-232` are removed.
+- **Actual caller:** `HiddenGems.hide_gem` (`hidden_gems.py:351`). The one test caller is
+  `tests/test_hidden_gems_dotenv.py:442`, on `DotEnvProvider`.
+- **Acceptance tests:** `test_only_dotenv_is_writable`, `test_read_only_providers_have_no_put_gem`,
+  `test_writable_provider_without_put_gem_is_abstract`, and the three existing dotenv write tests.
+
+#### `WritableGemProvider`
+
+- **Signature:** `class WritableGemProvider(AbstractGemProvider)` in `abstract_provider.py`, with the abstract
+  `put_gem` above. It defines no `__init__` and holds no state.
+- **Status:** optional base class; a provider that stores gems MUST subclass it.
+- **Behavior:** declares that a provider stores gems. It adds no behavior.
+- **Implementation owner:** `abstract_provider.py`; `DotEnvProvider` subclasses it.
+- **Actual caller:** `write_capability`, rule 2.
+- **Acceptance tests:** `test_only_dotenv_is_writable`, `test_writable_provider_without_put_gem_is_abstract`, and
+  `test_example_providers_follow_the_contract`.
+
+#### `write_capability`
+
+- **Signature:** `def write_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation` in
+  `abstract_provider.py`.
+- **Status:** MUST ADD.
+- **Behavior:** the four rules under [Names, signatures, errors, and call sites](#names-signatures-errors-and-call-sites).
+  It returns `CapabilityObservation(capability=Capability.WRITE, state=<the rule's state>,
+  source=EvidenceSource.PROVIDER_CLASS, reason=<the rule's constant>)`. It reads only the class, never an
+  instance, and never returns `None`.
+- **Implementation owner:** `abstract_provider.py`.
+- **Actual caller:** `HiddenGems.hide_gem`, step 2.
+- **Acceptance tests:** `test_write_capability_reports_each_state`,
+  `test_write_capability_rejects_a_non_provider_class`, and
+  `test_inherited_legacy_writer_registered_through_provider_types`.
+
+#### `Capability`, `CapabilityState`, `CapabilityObservation`, and `EvidenceSource.PROVIDER_CLASS`
+
+- **Signature:** as listed under `src/hiddengems/abstraction.py` above.
+- **Status:** MUST ADD.
+- **Behavior:** the typed result of a capability check; values only, no behavior.
+- **Implementation owner:** `abstraction.py`.
+- **Actual caller:** `write_capability` builds them; `ProviderNotWritableError` carries one.
+- **Acceptance tests:** `test_write_capability_reports_each_state`.
+
+#### `ProviderNotWritableError` and `LEGACY_WRITER_WARNING`
+
+- **Signature:** `class ProviderNotWritableError(NotImplementedError)` with
+  `__init__(self, provider: str, instance_id: str, observation: CapabilityObservation) -> None`, and
+  `LEGACY_WRITER_WARNING: Final[str]`, both in `hidden_gems.py`.
+- **Status:** MUST ADD; the constant only with the legacy writer path.
+- **Behavior:** as listed under `src/hiddengems/hidden_gems.py` above.
+- **Implementation owner:** `hidden_gems.py`.
+- **Actual caller:** `HiddenGems.hide_gem`, steps 4 and 5.
+- **Acceptance tests:** `test_hide_gem_rejects_read_only_provider_before_any_call`,
+  `test_legacy_writer_registered_through_provider_types`, and
+  `test_inherited_legacy_writer_registered_through_provider_types`.
+
+#### `HiddenGems.hide_gem`
+
+- **Signature:** unchanged.
+- **Status:** behavior change.
+- **Behavior:** the five steps listed under `src/hiddengems/hidden_gems.py` above.
+- **Implementation owner:** `hidden_gems.py`.
+- **Actual caller:** the caller of the library.
+- **Acceptance tests:** the cases of the two entries above, and the three existing dotenv write tests.
+
+### 2. What each extension extends
+
+`WritableGemProvider` is a subclass of `AbstractGemProvider`, awaiting the owner's approval with this proposal.
+Everything else is a function, a type, or an error that uses `AbstractGemProvider` without changing it. `Δ`
+removes one member from `B`, `put_gem`, and adds it to that subclass unchanged. The factory is unchanged.
+
+### 3. Providers in P
+
+| Provider | Applicable contract | `write_capability` | Change |
+| --- | --- | --- | --- |
+| `OnePasswordProvider` | `AbstractGemProvider` | `UNSUPPORTED` | stub removed |
+| `DotEnvProvider` | `WritableGemProvider` | `SUPPORTED` | base class changes |
+| `KeyringProvider` | `AbstractGemProvider` | `UNSUPPORTED` | stub removed |
+| `KubernetesProvider` | `AbstractGemProvider` | `UNSUPPORTED` | stub removed |
+
+`get_gem` of each keeps its baseline error behavior, as listed in the contributor contract.
+
+### 4. Baseline tests whose expectations change
+
+None. The only baseline uses of `put_gem` and `hide_gem` are in `tests/test_hidden_gems_dotenv.py`, all on
+`DotEnvProvider` or `HiddenDotFileGem`, which stay writable. No baseline test calls the three removed stubs.
+
+### 5. Baseline
+
+The baseline stays commit `4438234`. This proposal does not redefine `B`.
 
 ## Before and after
 
@@ -375,6 +504,19 @@ Legacy writers, a decision that applies only with option two:
 - **Without it.** Only `SUPPORTED` providers are written to. A legacy writer registered through
   `provider_types` raises `ProviderNotWritableError` until its author changes the base class.
 
+Read errors of `get_gem` (finding GP-14), a decision that applies to either option:
+
+- **(a) Keep the baseline here (recommended).** `B` defines no error for a location that is gone, and this
+  feature changes no read path, so its providers match `C`. The uniform error becomes the proposed feature
+  `GAL-read-errors`, listed under [Dependencies on other features](#dependencies-on-other-features).
+- **(b) Add the uniform error to this feature's `Δ`.** `get_gem` MUST raise `ProviderLookupError` when the
+  location or key is gone.
+  - Owners: `KubernetesProvider.get_gem` translates `KeyError` and the client's `ApiException` with status
+    404; `OnePasswordProvider.get_gem` translates the SDK's exception on the SDK path.
+  - Acceptance cases: `test_kubernetes_get_gem_reports_a_removed_key_as_lookup_error` and
+    `test_onepassword_sdk_get_gem_reports_a_failure_as_lookup_error`.
+  - Consequence: two read paths change in a feature about writing.
+
 Removing `src/hiddengems/abstract_provier.py`, a separate decision:
 
 - The file defines a second `AbstractGemProvider` with older signatures: `find_gem` returns
@@ -438,6 +580,19 @@ Cases:
     message names the class and contains neither `"X"` nor `"fake-value"`; `put_gem` called once; its reference
     returned.
   - Expected without it: `ProviderNotWritableError` with state `UNKNOWN`; `put_gem` never called.
+- `test_inherited_legacy_writer_registered_through_provider_types`.
+  - Input: a legacy test class as in the previous case, and a concrete subclass of it that defines no
+    `put_gem` of its own. `GemProvider.provider_types` is replaced with a tuple holding the subclass, and
+    `HiddenGems` builds its one instance through `GemProvider.create`. Then
+    `hide_gem("X", "fake-value", provider=...)`.
+  - Expected with the legacy writer path: `write_capability(subclass)` reports `UNKNOWN` with
+    `WRITE_LEGACY_REASON`; one `DeprecationWarning` naming the subclass; the inherited `put_gem` called once;
+    its `GemReference` returned.
+  - Expected without it: `ProviderNotWritableError` with state `UNKNOWN`; `put_gem` never called.
+- `test_write_capability_rejects_a_non_provider_class`.
+  - Input: `object`, the string `"dotenv"`, and a class with a `put_gem` that does not subclass
+    `AbstractGemProvider`.
+  - Expected: each raises `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`.
 - `test_example_providers_follow_the_contract`.
   - Input: `tests/contract/example_providers.py`, with `monkeypatch.setenv("EXAMPLE_GEM", "fake-value")`.
   - Expected:
@@ -478,6 +633,9 @@ Proposed new features. They are not in the feature index and need the owner's ap
   `dig_gem` reads the Keychain once instead of twice.
 - **Keychain duplicate items:** enumerate same-name items, give each a distinct reference, and read by that
   reference. The existence check alone does not provide this.
+- **`GAL-read-errors`:** `get_gem` raises `ProviderLookupError` when the location or key is gone, in every
+  built-in provider. Its owners and cases are option (b) of the read-error decision above. It extends `B`,
+  so it is locked until its proposal declares the five parts of the gate.
 - **Implicit preference records:** a typed record that providers return for native-tool defaults such as
   `KUBECONFIG`, consumed by `GAL-scope`, kept separate from the open precedence decision
   `GAL-explicit-implicit`.
