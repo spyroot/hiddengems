@@ -1,10 +1,15 @@
 # GAL-plugin: provider contract and writable capability
 
-Status: proposal, revision 6. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 7. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
 writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
 
-Revision 6 adds the [Exceptions](#exceptions) section required by the overview's
+Revision 7 narrows the input rule of `write_capability`: only an input that is not a class raises
+`TypeError`. A class that does not subclass `AbstractGemProvider`, such as a test double registered by
+patching `GemProvider.create`, is classified like any other, so `hide_gem` never fails on it with a
+`TypeError`. `deadline_capability` of `GAL-parallel` follows the same rule.
+
+Revision 6 added the [Exceptions](#exceptions) section required by the overview's
 [exception rules](../provider-routing-design.md#exception-consistency), and the check that enforces them,
 `test_exception_classes_match_the_register`.
 
@@ -255,8 +260,8 @@ Option two changes these files. Option one changes none.
 - **New: `write_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation`.** Never returns
   `None`. Its source is always `EvidenceSource.PROVIDER_CLASS`, because it reads only the class. The rules
   apply in this order:
-  1. `provider_type` that is not a class, or not a subclass of `AbstractGemProvider`, raises `TypeError` with
-     `WRITE_CAPABILITY_INPUT_ERROR`;
+  1. an input that is not a class raises `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`. Every class is
+     classified by the rules below, whether or not it subclasses `AbstractGemProvider`;
   2. a subclass of `WritableGemProvider` gives `SUPPORTED`, with `WRITE_SUPPORTED_REASON`;
   3. a class on which `inspect.getattr_static(provider_type, "put_gem", _MISSING)` finds a callable gives
      `UNKNOWN`, with `WRITE_LEGACY_REASON`. The lookup follows the method resolution order, so a `put_gem`
@@ -269,7 +274,7 @@ Option two changes these files. Option one changes none.
   - `WRITE_SUPPORTED_REASON = "Subclasses WritableGemProvider"`;
   - `WRITE_LEGACY_REASON = "Resolves put_gem without subclassing WritableGemProvider"`;
   - `WRITE_UNSUPPORTED_REASON = "Does not subclass WritableGemProvider and resolves no put_gem"`;
-  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs an AbstractGemProvider subclass, not {value!r}"`.
+  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs a class, not {value!r}"`.
 
   A structural `typing.Protocol` with `runtime_checkable` is rejected, because it reports any object with a
   `put_gem` attribute as writable, including a stub that only raises.
@@ -355,7 +360,7 @@ baseline is commit `4438234`.
 - **Implementation owner:** `abstract_provider.py`.
 - **Actual caller:** `HiddenGems.hide_gem`, step 2.
 - **Acceptance tests:** `test_write_capability_reports_each_state`,
-  `test_write_capability_rejects_a_non_provider_class`, and
+  `test_write_capability_rejects_a_non_class_input`, and
   `test_inherited_legacy_writer_registered_through_provider_types`.
 
 #### `Capability`, `CapabilityState`, `CapabilityObservation`, and `EvidenceSource.PROVIDER_CLASS`
@@ -430,7 +435,7 @@ One new class and one reuse, under the overview's exception rules:
   - Attributes `provider`, `instance_id`, and `observation`; the message names the provider and instance only.
   - Cases: `test_hide_gem_rejects_read_only_provider_before_any_call` asserts that it is a `NotImplementedError`
     and that neither the gem name nor the value is in its message.
-- **Reused: `TypeError`** from `write_capability` for an input that is not an `AbstractGemProvider` subclass.
+- **Reused: `TypeError`** from `write_capability` for an input that is not a class.
   This is a programming error in the caller, which is what `TypeError` already means.
 - **Warning reused: `DeprecationWarning`** with `LEGACY_WRITER_WARNING`, under the legacy writer path. A legacy
   writer is a deprecated way to declare writing, which is what `DeprecationWarning` already means.
@@ -626,10 +631,11 @@ Cases:
     its `GemReference` returned.
   - Expected without it: `ProviderNotWritableError` with state `UNKNOWN`; `put_gem` never called.
 - `test_exception_classes_match_the_register`, as specified under [Exceptions](#exceptions).
-- `test_write_capability_rejects_a_non_provider_class`.
-  - Input: `object`, the string `"dotenv"`, and a class with a `put_gem` that does not subclass
-    `AbstractGemProvider`.
-  - Expected: each raises `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`.
+- `test_write_capability_rejects_a_non_class_input`.
+  - Input: the string `"dotenv"`, the instance `object()`, and then two classes: `object`, and a class with a
+    `put_gem` that does not subclass `AbstractGemProvider`.
+  - Expected: the string and the instance raise `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`. `object` is
+    `UNSUPPORTED`, and the class with `put_gem` is `UNKNOWN`; neither raises.
 - `test_example_providers_follow_the_contract`.
   - Input: `tests/contract/example_providers.py`, with `monkeypatch.setenv("EXAMPLE_GEM", "fake-value")`.
   - Expected:
