@@ -1,8 +1,26 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 3. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 4. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 4 aligns names, modules, and dependencies with the other feature proposals:
+
+- `LEGACY_DEADLINE_WARNING` and the new `deadline_capability` reason constants live in
+  `constants/capability.py`, which `GAL-plugin` creates.
+- `deadline_capability` takes `provider_type: type`. `UNKNOWN` requires both `find_gem_within` and
+  `get_gem_within` to resolve. The reused `DeprecationWarning` is listed under [Exceptions](#exceptions).
+- One deadline per lookup: `inspect_gem` and `resolve_gem` delegate to the new private `_inspect_within` and
+  `_resolve_within`, and `dig_gem` shares one deadline between resolution and the read. The read chooses by
+  `deadline_capability`.
+- A lookup with no records skips the thread pool.
+- Non-cooperative option (b) is specified as `_find_in_child` and `_get_in_child`, which build the instance through
+  `GAL-discovery`.
+- Keychain option (a) names its native files and constants and raises `KEYCHAIN_ABI_VERSION` from 1 to 2. Under
+  Keychain option (b), `KeyringProvider` is `UNSUPPORTED`.
+- If the SDK test fails, an SDK-only 1Password instance raises `NO_DEADLINE_REASON` under a finite deadline.
+- The Purpose states the two known limits, `GAL-secure-cache` is listed as a dependent, and the baseline trace notes
+  that patched class limits keep working.
 
 Revision 3 corrects revision 2, whose claim that no baseline test changes did not hold:
 
@@ -30,7 +48,9 @@ Revision 2 added three things:
 
 A lookup checks its providers in parallel, never runs more calls at once than `LOOKUP_WORKERS`, and finishes
 within `LOOKUP_TIMEOUT_SECONDS` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every provider call it starts also stops
-within that bound. A provider that runs out of time becomes a `LookupIssue`, exactly like a provider that could
+within that bound, except the two known limits under Built-in deadline handling, a slow but steady Kubernetes
+response and a declared dotenv file on an unresponsive mount, where one blocked read can outlast the bound and
+shutdown waits for it. A provider that runs out of time becomes a `LookupIssue`, exactly like a provider that could
 not be checked today. The merged result does not depend on which call finishes first.
 
 - **Today:** `HiddenGems.inspect_gem` calls `find_gem` on each record in turn (`hidden_gems.py:237-260`), with
@@ -67,12 +87,18 @@ Out of scope:
 ```text
 ~ src/hiddengems/abstraction.py                  Deadline; Capability.DEADLINE
 ~ src/hiddengems/abstract_provider.py            DeadlineAwareGemProvider; deadline_capability
+~ src/hiddengems/constants/capability.py         deadline reason constants; LEGACY_DEADLINE_WARNING
 ~ src/hiddengems/constants/lookup.py             the lookup constants below
-~ src/hiddengems/hidden_gems.py                  parallel inspect_gem with one deadline; bounded dig_gem read
+~ src/hiddengems/hidden_gems.py                  _inspect_within, _resolve_within; one deadline per lookup;
+                                                 bounded dig_gem read; _find_in_child, _get_in_child under (b)
 ~ src/hiddengems/gems/dotenv_provider.py         find_gem_within, get_gem_within
 ~ src/hiddengems/gems/k8s_provider.py            find_gem_within, get_gem_within; per-request budget
 ~ src/hiddengems/gems/onepassword_provider.py    find_gem_within, get_gem_within; CLI and SDK budgets
 ~ src/hiddengems/gems/keyring_provider.py        find_gem_within, get_gem_within; per the Keychain decision
+~ src/hiddengems/gems/keychain_constants.py      Keychain option (a): KEYCHAIN_* constants
+~ src/hiddengems/gems/keychain_bridge.h          Keychain option (a): interaction-not-allowed status
+~ src/hiddengems/gems/keychain_bridge.cpp        Keychain option (a)
+~ src/hiddengems/gems/keychain_reader.cpp        Keychain option (a): query without interactive UI
 ~ tests/test_hidden_gems_routing.py              FakeProvider gains delay and cooperation; new cases
 ~ tests/contract/example_providers.py            a provider that ignores deadlines
 ~ tests/contract/test_provider_contract.py       deadline contract cases
@@ -102,25 +128,33 @@ Out of scope:
   Contract: the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
   within `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every operation it starts, including a
   process or a request, ends within that time.
-- **Built-ins:** each implements both methods. Its existing `find_gem` and `get_gem` delegate to them with
-  `Deadline.unbounded()`, so direct callers keep today's behavior.
+- **Built-ins:** each implements both methods, except `KeyringProvider` under Keychain option (b). Its existing
+  `find_gem` and `get_gem` delegate to them with `Deadline.unbounded()`, so direct callers keep today's behavior.
 - **Unbounded means today's calls.** When `deadline.expires_at` is `math.inf`, a built-in makes exactly the
   calls it makes at `4438234`, with today's arguments. `_request_timeout`, a `deadline=` argument to
   `_run_cli`, and the `asyncio.wait_for` wrapper are added only for a finite deadline.
-- **New: `deadline_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation`,** with source
+- **New: `deadline_capability(provider_type: type) -> CapabilityObservation`,** with source
   `EvidenceSource.PROVIDER_CLASS`:
-  - an input that is not a class raises `TypeError`;
-  - `SUPPORTED` for a subclass of `DeadlineAwareGemProvider`;
-  - `UNKNOWN` for any other class on which `inspect.getattr_static` finds a callable `find_gem_within`
-    through the method resolution order;
-  - `UNSUPPORTED` otherwise.
-- **New constant:** `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without
-  subclassing DeadlineAwareGemProvider; subclass it to keep parallel lookup"`, in `constants/lookup.py`.
+  - an input that is not a class raises `TypeError(DEADLINE_CAPABILITY_INPUT_ERROR.format(value=...))`;
+  - `SUPPORTED`, with `DEADLINE_SUPPORTED_REASON`, for a subclass of `DeadlineAwareGemProvider`;
+  - `UNKNOWN`, with `DEADLINE_LEGACY_REASON`, for any other class on which `inspect.getattr_static` finds both a
+    callable `find_gem_within` and a callable `get_gem_within` through the method resolution order;
+  - `UNSUPPORTED`, with `DEADLINE_UNSUPPORTED_REASON`, otherwise.
+- **New constants in `constants/capability.py`,** which `GAL-plugin` creates: `DEADLINE_SUPPORTED_REASON`,
+  `DEADLINE_LEGACY_REASON`, `DEADLINE_UNSUPPORTED_REASON`, `DEADLINE_CAPABILITY_INPUT_ERROR`, and
+  `LEGACY_DEADLINE_WARNING`, with the values listed under [Constants](#constants).
 
 `src/hiddengems/hidden_gems.py`:
 
-- **`HiddenGems.inspect_gem`** keeps its signature and its `LookupResult`. It now runs these steps:
-  1. Create `deadline = Deadline.after(LOOKUP_TIMEOUT_SECONDS)` once per lookup.
+- **`HiddenGems.inspect_gem` and `HiddenGems.resolve_gem`** keep their signatures and return types. Each creates
+  `Deadline.after(LOOKUP_TIMEOUT_SECONDS)` once and passes it to `_inspect_within` or `_resolve_within`.
+- **New: `HiddenGems._inspect_within(self, name: str, *, provider: str | None, target: str | None, criteria:
+  Mapping[str, Any] | None, deadline: Deadline) -> LookupResult`,** private. `target` is the parameter
+  `GAL-scope` (plan 4.1) adds to `inspect_gem`. It holds today's body of `inspect_gem`, which selects `records`,
+  and runs these steps:
+  1. Use the `deadline` it receives; it creates none, so one lookup has one deadline. When `records` is empty,
+     steps 2 to 5 are skipped and the result holds only the unavailable-provider issues, as today, because
+     `ThreadPoolExecutor(max_workers=0)` raises `ValueError`.
   2. Open
      `ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(records)), thread_name_prefix=LOOKUP_THREAD_PREFIX)`.
   3. For each record in record order:
@@ -135,10 +169,16 @@ Out of scope:
      `ProviderLookupError` are handled exactly as in today's loop. A `TimeoutError` from the wait becomes
      `LookupIssue(provider, instance_id, TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)`.
   5. Shut down with `executor.shutdown(wait=True, cancel_futures=True)`. Because every running call is bounded,
-     this wait is bounded too. A provider that breaks its contract and overruns is caught by the acceptance cases,
-     not hidden by a non-waiting shutdown.
-- **`HiddenGems.dig_gem`** reads the selected reference with
-  `get_gem_within(reference, deadline=Deadline.after(LOOKUP_TIMEOUT_SECONDS))`.
+     except under the two known limits named in the Purpose, this wait is bounded too. A provider that breaks its
+     contract and overruns is caught by the acceptance cases, not hidden by a non-waiting shutdown.
+- **New: `HiddenGems._resolve_within(self, name: str, *, provider: str | None, target: str | None, criteria:
+  Mapping[str, Any] | None, choice: str | None, deadline: Deadline) -> GemReference`,** private. `choice` is the
+  parameter `GAL-chooser` (plan 4.3) adds to `resolve_gem`. It holds today's body of `resolve_gem` and calls
+  `_inspect_within` with the same deadline.
+- **`HiddenGems.dig_gem`** creates one `deadline = Deadline.after(LOOKUP_TIMEOUT_SECONDS)` and passes it to
+  `_resolve_within` and to the read of the selected reference. The read chooses by `deadline_capability`:
+  - `SUPPORTED` and `UNKNOWN` call `get_gem_within(reference, deadline=deadline)`;
+  - `UNSUPPORTED` follows the [non-cooperative provider decision](#alternatives-for-the-owners-decision).
 
 Built-in deadline handling:
 
@@ -155,7 +195,12 @@ Built-in deadline handling:
   installed in the `hiddengems` environment, so whether cancelling stops its native work is not known. Rule:
   the SDK path is bounded only if `test_onepassword_sdk_work_ends_at_the_deadline`, run with the SDK
   installed, finds no SDK task or thread alive after the call returns. If it does not pass,
-  `OnePasswordProvider` sends SDK lookups through the non-cooperative path, and the CLI path stays bounded.
+  `OnePasswordProvider.find_gem_within` and `get_gem_within` raise
+  `ProviderLookupError(ONEPASSWORD_SDK_NO_DEADLINE_REASON, ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION)` for an
+  SDK-only instance under a finite deadline, and the CLI path stays bounded. Both are `Final[str]` in
+  `gems/onepassword_constants.py` (created by `GAL-settings`): `ONEPASSWORD_SDK_NO_DEADLINE_REASON = "The
+  1Password SDK cannot stop at a lookup deadline"` and `ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION = "Install or
+  enable the 1Password CLI for this account, then retry"`.
 - **Keychain:** per the [Keychain decision](#alternatives-for-the-owners-decision).
 - **dotenv:** reads one local file and checks the deadline before reading. Known limit: a declared file on an
   unresponsive network mount can block inside the operating system. The walk guard of `GAL-expand` keeps
@@ -174,8 +219,8 @@ baseline is commit `4438234`.
 - **Status:** MUST ADD.
 - **Behavior:** an absolute deadline on an injected monotonic clock; a value, with no side effects.
 - **Implementation owner:** `abstraction.py`.
-- **Actual caller:** `HiddenGems.inspect_gem` and `HiddenGems.dig_gem` create it; every `*_within` method reads
-  it.
+- **Actual caller:** `HiddenGems.inspect_gem`, `HiddenGems.resolve_gem`, and `HiddenGems.dig_gem` each create one
+  per lookup; every `*_within` method, including `_inspect_within` and `_resolve_within`, reads it.
 - **Acceptance tests:** `test_timed_out_call_stops_and_lookup_shuts_down` and
   `test_builtin_providers_stop_at_the_deadline`.
 
@@ -191,37 +236,89 @@ baseline is commit `4438234`.
 - **Why it is not a parallel contract:** it subclasses `AbstractGemProvider` and adds two methods under new
   names. `find_gem` and `get_gem` stay the MUST members with their signatures unchanged, and a built-in's
   `find_gem` and `get_gem` delegate to the new methods with `Deadline.unbounded()`. A provider that does not
-  subclass it keeps working: in process if it defines `find_gem_within`, otherwise through the
-  non-cooperative decision.
-- **Implementation owner:** `abstract_provider.py`; all four built-ins subclass it.
-- **Actual caller:** `HiddenGems.inspect_gem`, step 3, and `HiddenGems.dig_gem`.
+  subclass it keeps working: in process if it defines `find_gem_within` and `get_gem_within`, otherwise through
+  the non-cooperative decision.
+- **Implementation owner:** `abstract_provider.py`; all four built-ins subclass it, `KeyringProvider` only under
+  Keychain option (a).
+- **Actual caller:** `HiddenGems._inspect_within`, step 3, and the `HiddenGems.dig_gem` read.
 - **Acceptance tests:** `test_builtin_providers_stop_at_the_deadline`,
   `test_parallel_lookup_never_exceeds_lookup_workers`, and `test_parallel_merge_ignores_completion_order`.
 
 #### `deadline_capability` and `Capability.DEADLINE`
 
-- **Signature:** `def deadline_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation` in
+- **Signature:** `def deadline_capability(provider_type: type) -> CapabilityObservation` in
   `abstract_provider.py`, and the enum member `Capability.DEADLINE = "deadline"`.
 - **Status:** MUST ADD.
 - **Behavior:** the same rules and order as `write_capability` of `GAL-plugin`, with
-  `DeadlineAwareGemProvider` in place of `WritableGemProvider` and `find_gem_within` in place of `put_gem`: a
-  input that is not a class raises `TypeError`; the subclass gives `SUPPORTED`; a `find_gem_within` resolved
-  through the method resolution order, on any other class, gives `UNKNOWN`; anything else gives
-  `UNSUPPORTED`. Source:
+  `DeadlineAwareGemProvider` in place of `WritableGemProvider` and both `find_gem_within` and `get_gem_within` in
+  place of `put_gem`: an input that is not a class raises `TypeError` with `DEADLINE_CAPABILITY_INPUT_ERROR`; the
+  subclass gives `SUPPORTED` with `DEADLINE_SUPPORTED_REASON`; a `find_gem_within` and a `get_gem_within` both
+  resolved through the method resolution order, on any other class, give `UNKNOWN` with `DEADLINE_LEGACY_REASON`;
+  anything else gives `UNSUPPORTED` with `DEADLINE_UNSUPPORTED_REASON`. Source:
   `EvidenceSource.PROVIDER_CLASS`. Never `None`.
-- **Implementation owner:** `abstract_provider.py`.
-- **Actual caller:** `HiddenGems.inspect_gem`, step 3.
+- **Implementation owner:** `abstract_provider.py`, with the constants in `constants/capability.py`.
+- **Actual caller:** `HiddenGems._inspect_within`, step 3, and the `HiddenGems.dig_gem` read.
 - **Acceptance tests:** `test_deadline_capability_reports_each_state`.
 
 #### `HiddenGems.inspect_gem` and `HiddenGems.dig_gem`
 
-- **Signature:** unchanged.
+- **Signature:** unchanged, for these two and for `HiddenGems.resolve_gem`.
 - **Status:** behavior change.
-- **Behavior:** the steps listed under `src/hiddengems/hidden_gems.py` above.
+- **Behavior:** the steps listed under `src/hiddengems/hidden_gems.py` above. `inspect_gem` and `resolve_gem`
+  delegate with `Deadline.after(LOOKUP_TIMEOUT_SECONDS)`; `dig_gem` creates one deadline for `_resolve_within` and
+  the read.
 - **Implementation owner:** `hidden_gems.py`.
 - **Actual caller:** the caller of the library.
 - **Acceptance tests:** every case in `tests/test_hidden_gems_routing.py` below, and the existing routing tests,
   unchanged.
+
+#### `HiddenGems._inspect_within` and `HiddenGems._resolve_within`
+
+- **Signature:** `_inspect_within(self, name: str, *, provider: str | None, target: str | None, criteria:
+  Mapping[str, Any] | None, deadline: Deadline) -> LookupResult` and `_resolve_within(self, name: str, *,
+  provider: str | None, target: str | None, criteria: Mapping[str, Any] | None, choice: str | None, deadline:
+  Deadline) -> GemReference`, private methods of `HiddenGems`. `None` means not given, as in the public methods.
+- **Status:** MUST ADD.
+- **Behavior:** today's bodies of `inspect_gem` and `resolve_gem`, plus the parallel steps listed under
+  `src/hiddengems/hidden_gems.py` above, under the one deadline they receive. They create no deadline.
+- **Implementation owner:** `hidden_gems.py`.
+- **Actual caller:** `HiddenGems.inspect_gem` calls `_inspect_within`; `HiddenGems.resolve_gem` and
+  `HiddenGems.dig_gem` call `_resolve_within`, which calls `_inspect_within`.
+- **Acceptance tests:** `test_timed_out_call_stops_and_lookup_shuts_down`,
+  `test_lookup_with_no_records_skips_the_pool`, and the existing routing tests, unchanged.
+
+#### `HiddenGems._find_in_child` and `HiddenGems._get_in_child`
+
+- **Signature:** `_find_in_child(self, record: DetectedProvider, provider_type: type, name: str, criteria:
+  Mapping[str, Any] | None, deadline: Deadline) -> tuple[GemReference, ...]` and `_get_in_child(self, record:
+  DetectedProvider, provider_type: type, reference: GemReference, deadline: Deadline) -> list[Gem]`, private
+  methods of `HiddenGems`.
+- **Status:** MUST ADD under non-cooperative option (b) only.
+- **Behavior:** each starts a child from `multiprocessing.get_context(CHILD_START_METHOD)`. The child builds the
+  instance with `GemProvider.create(record, types=(provider_type,))` from `GAL-discovery`; the class crosses the
+  pipe by module and qualified name. At `deadline.remaining() + LOOKUP_SHUTDOWN_GRACE_SECONDS` the child is
+  terminated and joined, and `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` is raised. A class that
+  pickle cannot reference by name is handled as under option (a).
+- **Implementation owner:** `hidden_gems.py`.
+- **Actual caller:** `HiddenGems._inspect_within`, step 3, calls `_find_in_child`; the `HiddenGems.dig_gem` read
+  calls `_get_in_child`, both for an `UNSUPPORTED` provider.
+- **Acceptance tests:** `test_non_cooperative_provider_never_runs_unbounded`.
+
+#### Keychain interaction-not-allowed status
+
+- **Signature:** in `gems/keychain_constants.py`, which `GAL-settings` creates:
+  `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`, mirroring the new `HG_KEYCHAIN_INTERACTION_NOT_ALLOWED = 3`
+  after `HG_KEYCHAIN_ERROR = 2` in `keychain_bridge.h`; `KEYCHAIN_ABI_VERSION: Final[int] = 2`,
+  moved from `_HG_KEYCHAIN_ABI_VERSION = 1` at `keyring_provider.py:29` and raised from 1 to 2; and
+  `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`. The status is
+  added to `keychain_bridge.h`, and `keychain_bridge.cpp` and `keychain_reader.cpp` return it.
+- **Status:** MUST ADD under Keychain option (a) only.
+- **Behavior:** the native read asks the Keychain not to prompt. A locked or authorization-gated item returns
+  `KEYCHAIN_INTERACTION_NOT_ALLOWED` at once, and `KeyringProvider` reports it as UNKNOWN with
+  `KEYCHAIN_LOCKED_NEXT_ACTION`.
+- **Implementation owner:** `keychain_reader.cpp` and `keyring_provider.py`.
+- **Actual caller:** `KeyringProvider.find_gem_within` and `KeyringProvider.get_gem_within`.
+- **Acceptance tests:** the Keychain case of `test_builtin_providers_stop_at_the_deadline`.
 
 ### 2. What each extension extends
 
@@ -234,7 +331,8 @@ proposal. `B` loses no member and changes no signature. The factory is unchanged
 | --- | --- | --- | --- |
 | `OnePasswordProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | CLI timeout kills `op`; SDK under `wait_for` |
 | `DotEnvProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | checks the deadline before reading |
-| `KeyringProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | per the Keychain decision |
+| `KeyringProvider`, Keychain option (a) | `DeadlineAwareGemProvider` | `SUPPORTED` | a non-interactive query |
+| `KeyringProvider`, Keychain option (b) | `AbstractGemProvider` | `UNSUPPORTED` | the non-cooperative path |
 | `KubernetesProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | `_request_timeout` from the remaining time |
 
 ### 4. Baseline tests whose expectations change
@@ -245,12 +343,14 @@ None. Each of the nine baseline routing tests, traced through the new code:
   `test_detection_runs_once_and_list_valued_gem_stays_nested`, and
   `test_namespace_only_preference_resolves_unique_cluster`. Its `ClusterProvider` subclass overrides only
   `find_gem`. `FakeProvider` gains `find_gem_within` and `get_gem_within`, which delegate to `self.find_gem`
-  and `self.get_gem`, so `deadline_capability` is `UNKNOWN`. Step 3 then calls it in process with one
-  `DeprecationWarning`. The matches, issues, and values are the same, and the warning does not fail the suite,
-  because `pyproject.toml` sets no `filterwarnings`.
+  and `self.get_gem`, so `deadline_capability` is `UNKNOWN`. Step 3 of `_inspect_within` then calls it in
+  process with one `DeprecationWarning`. The matches, issues, and values are the same, and the warning does not
+  fail the suite, because `pyproject.toml` sets no `filterwarnings`.
 - **Through `HiddenGems` over real Kubernetes records:**
   `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`. The provider is `SUPPORTED`, and its
-  records and pseudo-instances are unchanged.
+  records and pseudo-instances are unchanged. The test patches the class limits `_MAX_AUTO_CONFIG_BYTES` and
+  `_MAX_DIRECTORY_ENTRIES` of `KubernetesProvider`; it keeps working because `GAL-settings` keeps the class
+  attributes as the read path, initialized from the new module constants.
 - **Calling a provider directly, with an unbounded deadline:**
   - `test_kubernetes_keeps_confirmed_match_when_other_namespace_is_unchecked`: its fake
     `read_secret(*, name, namespace)` accepts no `_request_timeout`. With an unbounded deadline none is
@@ -279,11 +379,13 @@ No new class. Each situation reuses an existing one, under the overview's except
   exactly a timeout, and the router already turns it into a `LookupIssue`.
 - **A wait that times out in the router** (`TimeoutError` from `Future.result`) becomes the same `LookupIssue`,
   so `dig_gem` raises `IncompleteGemLookupError`, as for any unchecked provider.
-- **A non-cooperative provider under option (a)** becomes a `LookupIssue` with `NO_DEADLINE_REASON`, not an
-  exception.
-- **`deadline_capability` with a non-provider input** raises `TypeError`, as `write_capability` does.
+- **A non-cooperative provider under option (a)**, or under option (b) one whose class pickle cannot reference by
+  name, becomes a `LookupIssue` with `NO_DEADLINE_REASON`, not an exception.
+- **`deadline_capability` with an input that is not a class** raises `TypeError`, as `write_capability` does.
 - **The 1Password CLI's `subprocess.TimeoutExpired`** is translated to `ProviderLookupError`, as
   `onepassword_provider.py` already does today.
+- **Warning reused: `DeprecationWarning`** with `LEGACY_DEADLINE_WARNING`, for an `UNKNOWN` provider: a one-time
+  migration, as `GAL-plugin` does for a legacy writer.
 
 `test_exception_classes_match_the_register` of `GAL-plugin` therefore needs no new entry for this feature.
 
@@ -298,9 +400,28 @@ In `src/hiddengems/constants/lookup.py`, beside the constants the overview alrea
   none outlives the lookup.
 - `TIMEOUT_REASON` and `TIMEOUT_NEXT_ACTION`, as in the overview.
 - `NO_DEADLINE_REASON: Final[str] = "Provider cannot honor a lookup deadline"` and
-  `NO_DEADLINE_NEXT_ACTION: Final[str] = "Subclass DeadlineAwareGemProvider"`, used only under non-cooperative
-  option (a).
+  `NO_DEADLINE_NEXT_ACTION: Final[str] = "Subclass DeadlineAwareGemProvider"`, used under non-cooperative
+  option (a), under option (b) for a class that pickle cannot reference by name, and by `OnePasswordProvider` for
+  an SDK-only instance if `test_onepassword_sdk_work_ends_at_the_deadline` does not pass.
 - `CHILD_START_METHOD: Final[str] = "spawn"`, used only under non-cooperative option (b).
+
+In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants:
+
+- `DEADLINE_SUPPORTED_REASON: Final[str] = "Subclasses DeadlineAwareGemProvider"`.
+- `DEADLINE_LEGACY_REASON: Final[str] = "Resolves find_gem_within and get_gem_within without subclassing
+  DeadlineAwareGemProvider"`.
+- `DEADLINE_UNSUPPORTED_REASON: Final[str] = "Does not subclass DeadlineAwareGemProvider and resolves no deadline
+  methods"`.
+- `DEADLINE_CAPABILITY_INPUT_ERROR: Final[str] = "deadline_capability needs a class, not {value!r}"`.
+- `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without subclassing
+  DeadlineAwareGemProvider; subclass it to keep parallel lookup"`.
+
+In `src/hiddengems/gems/keychain_constants.py`, which `GAL-settings` creates, under Keychain option (a) only:
+
+- `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int]`: the new bridge status.
+- `KEYCHAIN_ABI_VERSION: Final[int] = 2`: moved from `_HG_KEYCHAIN_ABI_VERSION = 1` at `keyring_provider.py:29`
+  and raised from 1 to 2.
+- `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`.
 
 ## Libraries
 
@@ -320,9 +441,10 @@ standard library.
 
 ## Alternatives for the owner's decision
 
-An `UNKNOWN` provider, one that defines `find_gem_within` without subclassing `DeadlineAwareGemProvider`:
+An `UNKNOWN` provider, one that defines `find_gem_within` and `get_gem_within` without subclassing
+`DeadlineAwareGemProvider`:
 
-- **(a) Call it in process, with a `DeprecationWarning` (recommended).** It declares the method, so it is
+- **(a) Call it in process, with a `DeprecationWarning` (recommended).** It declares the methods, so it is
   trusted to honor the deadline, exactly as `GAL-plugin`'s legacy writer path trusts a `put_gem`. The baseline
   routing fakes keep working unchanged in their assertions.
 - **(b) Treat it as non-cooperative.** Then `FakeProvider` must subclass `DeadlineAwareGemProvider`, which
@@ -333,20 +455,24 @@ A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
 - **(a) Refuse it in parallel lookup.** It is never called. Its lookups become a `LookupIssue` with
   `NO_DEADLINE_REASON` and `NO_DEADLINE_NEXT_ACTION`. Simple and bounded, but a provider registered by replacing
   `GemProvider.provider_types` stops being checked until its author adopts the interface.
-- **(b) Run it in a child process** started with `CHILD_START_METHOD`. The child is terminated when the deadline
-  plus grace passes; the instance is rebuilt in the child from its record. Bounded and compatible, at the cost of
-  a process per call, and values for `dig_gem` crossing a local pipe between the user's own processes.
-  Recommended: it keeps every registered provider usable.
+- **(b) Run it in a child process** started with `CHILD_START_METHOD`, through `HiddenGems._find_in_child` and
+  `HiddenGems._get_in_child`. The child is terminated when the deadline plus grace passes. The child builds the
+  instance with `GemProvider.create(record, types=(provider_type,))` from `GAL-discovery`; the class crosses the
+  pipe by module and qualified name; a class that pickle cannot reference by name is handled as under option (a).
+  Bounded and compatible, at the cost of a process per call, and values for `dig_gem` crossing a local pipe
+  between the user's own processes. Recommended: it keeps every registered provider usable.
 - A third option, running it without a bound, fails the gate, so it is not offered.
 
 The Keychain, whose query can wait on an authorization prompt:
 
 - **(a) Query without interactive UI.** The native read asks the Keychain not to prompt. A locked or
-  authorization-gated item then returns at once and is reported UNKNOWN, with the next action "unlock the
-  Keychain or allow access, then re-run". This changes the native bridge and raises its ABI version, overlapping
-  the proposed Keychain existence feature. Recommended: a parallel lookup never waits on a dialog.
-- **(b) Treat the Keychain as non-cooperative.** It goes through the chosen non-cooperative path, and its prompt
-  can still appear until the deadline ends it.
+  authorization-gated item then returns at once and is reported UNKNOWN, with the next action
+  `KEYCHAIN_LOCKED_NEXT_ACTION`. This changes the native bridge and raises `KEYCHAIN_ABI_VERSION` from 1 to 2;
+  the proposed Keychain existence feature builds on version 2. Recommended: a parallel lookup never waits on a
+  dialog.
+- **(b) Treat the Keychain as non-cooperative.** `KeyringProvider` does not subclass `DeadlineAwareGemProvider`
+  and is `UNSUPPORTED`. It goes through the chosen non-cooperative path, and its prompt can still appear until the
+  deadline ends it.
 
 ## Acceptance cases
 
@@ -393,14 +519,18 @@ In `tests/test_hidden_gems_routing.py`:
   - Expected under option (b): its child process has ended (`exitcode` is set) when `inspect_gem` returns, within
     0.2 seconds plus the grace.
   - Under either option, no lookup thread is left alive.
+- `test_lookup_with_no_records_skips_the_pool`.
+  - Input: `HiddenGems(providers=(), config_path=tmp_path / "missing.json")`.
+  - Expected: `dig_gem` raises `GemNotFoundError`, as today, and no thread whose name starts with
+    `LOOKUP_THREAD_PREFIX` is started.
 
 In `tests/contract/test_provider_contract.py`:
 
 - `test_deadline_capability_reports_each_state`.
-  - Input: the four built-ins, `BlockingExampleProvider`, and a class that defines `find_gem_within` without the
-    base.
+  - Input: the four built-ins, `BlockingExampleProvider`, and a class that defines `find_gem_within` and
+    `get_gem_within` without the base.
   - Expected: `SUPPORTED`, `UNSUPPORTED`, and `UNKNOWN` respectively, each with source `PROVIDER_CLASS`, never
-    `None`.
+    `None`. Under Keychain option (b), `KeyringProvider` gives `UNSUPPORTED`.
 - `test_onepassword_sdk_work_ends_at_the_deadline`, skipped when the SDK is not installed.
   - Input: the real SDK client patched to a coroutine that awaits a native call which never returns.
   - Expected: the call ends within the bound, and no SDK task or thread is alive afterwards.
@@ -414,14 +544,19 @@ In `tests/contract/test_provider_contract.py`:
   - **1Password SDK:** a fake client whose coroutine waits on an event that is never set. Expected: the call ends
     within the bound.
   - **Keychain, under option (a):** the existing fake library from `tests/test_hidden_gems_keyring.py`, extended
-    to return the interaction-not-allowed status. Expected: the call returns at once, UNKNOWN, with the unlock
-    next action.
+    to return `KEYCHAIN_INTERACTION_NOT_ALLOWED`. Expected: the call returns at once, UNKNOWN, with
+    `KEYCHAIN_LOCKED_NEXT_ACTION`.
 
 ## Dependencies on other features
 
 - **Requires:**
-  - `GAL-plugin`, for `Capability`, `CapabilityObservation`, and `EvidenceSource.PROVIDER_CLASS`;
-  - `GAL-settings`, which introduces `constants/lookup.py`.
+  - `GAL-plugin`, for `Capability`, `CapabilityObservation`, `EvidenceSource.PROVIDER_CLASS`, and
+    `constants/capability.py`;
+  - `GAL-settings`, which introduces `constants/lookup.py` and `gems/keychain_constants.py`;
+  - `GAL-discovery` under non-cooperative option (b), for `GemProvider.create(record, types=(provider_type,))`.
+- **Required by:** `GAL-secure-cache`, which uses `Deadline`, its injected clock, `_resolve_within`,
+  `get_gem_within`, `LOOKUP_TIMEOUT_SECONDS`, and `TIMEOUT_NEXT_ACTION`.
 - **Overlaps:** Keychain option (a) changes the native bridge, as the proposed Keychain existence feature does.
-  Whichever lands first raises the ABI version; the other builds on it.
+  Under Keychain option (a), this feature raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain
+  existence feature builds on version 2.
 - **Answers:** the overview's earlier `GAL-parallel` entry, which bounded only the caller's wait.
