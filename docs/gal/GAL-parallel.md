@@ -1,8 +1,16 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 6. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 6 answers review findings GPA3 and GPA4. GPA3: under non-cooperative option (b), a value that pickle
+cannot send from the child, such as an IO stream, makes `_get_in_child` raise
+`ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`, and the owner decides between that
+declared rejection and a mode-0600 temporary file. GPA4, Kubernetes: the known limit is replaced by a bounded
+read, `_read_secret_within`, which reads the body in chunks and checks the deadline before each one. GPA4, dotenv:
+the read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread, becomes an owner
+decision between a weaker contract for that case and a read in a bounded child for a file on another device.
 
 Revision 5 aligns this proposal with the second round of decisions. `_resolve_within` takes no `remember`;
 `resolve_gem` and `dig_gem` apply it after `_resolve_within` returns. `LOOKUP_TIMEOUT_SECONDS` comes from
@@ -57,10 +65,12 @@ Revision 2 added three things:
 
 A lookup checks its providers in parallel, never runs more calls at once than `LOOKUP_WORKERS`, and finishes
 within `LOOKUP_TIMEOUT_SECONDS` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every provider call it starts also stops
-within that bound, except the two known limits under Built-in deadline handling, a slow but steady Kubernetes
-response and a declared dotenv file on an unresponsive mount, where one blocked read can outlast the bound and
-shutdown waits for it. A provider that runs out of time becomes a `LookupIssue`, exactly like a provider that could
-not be checked today. The merged result does not depend on which call finishes first.
+within that bound, except, under option (a) of the [dotenv decision](#alternatives-for-the-owners-decision), the one
+known limit under Built-in deadline handling: the read of a declared dotenv file on an unresponsive mount, which the
+lookup waits for. Under option (b), a declared file whose device differs from the home directory's is read in a
+bounded child, and the lookup returns at the deadline plus grace. A provider that runs out of time becomes a
+`LookupIssue`, exactly like a provider that could not be checked today. The merged result does not depend on which
+call finishes first.
 
 - **Today:** `HiddenGems.inspect_gem` calls `find_gem` on each record in turn (`hidden_gems.py:237-260`), with
   no overall deadline.
@@ -96,12 +106,16 @@ Out of scope:
 ```text
 ~ src/hiddengems/abstraction.py                  Deadline; Capability.DEADLINE
 ~ src/hiddengems/abstract_provider.py            DeadlineAwareGemProvider; deadline_capability
++ src/hiddengems/child_runner.py                 run_in_child, under non-cooperative option (b) or dotenv option (b)
 ~ src/hiddengems/constants/capability.py         deadline reason constants; LEGACY_DEADLINE_WARNING
 ~ src/hiddengems/constants/lookup.py             the lookup constants below
 ~ src/hiddengems/hidden_gems.py                  _inspect_within, _resolve_within; one deadline per lookup;
-                                                 bounded dig_gem read; _find_in_child, _get_in_child under (b)
-~ src/hiddengems/gems/dotenv_provider.py         find_gem_within, get_gem_within
-~ src/hiddengems/gems/k8s_provider.py            find_gem_within, get_gem_within; per-request budget
+                                                 bounded dig_gem read; _find_in_child, _get_in_child, which wrap
+                                                 run_in_child, under non-cooperative option (b)
+~ src/hiddengems/gems/dotenv_provider.py         find_gem_within, get_gem_within; _read_dotenv_file; per the dotenv
+                                                 decision
+~ src/hiddengems/gems/k8s_provider.py            find_gem_within, get_gem_within; bounded _read_secret_within
+~ src/hiddengems/gems/kubernetes_constants.py    KUBE_READ_SLICE_SECONDS, KUBE_READ_CHUNK_BYTES
 ~ src/hiddengems/gems/onepassword_provider.py    find_gem_within, get_gem_within; CLI and SDK budgets
 ~ src/hiddengems/gems/onepassword_constants.py   ONEPASSWORD_SDK_NO_DEADLINE_* constants
 ~ src/hiddengems/gems/keyring_provider.py        find_gem_within, get_gem_within; per the Keychain decision
@@ -137,13 +151,15 @@ Out of scope:
 
   Contract: the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
   within `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every operation it starts, including a
-  process or a request, ends within that time.
+  process or a request, ends within that time. The one exception, under option (a) of the
+  [dotenv decision](#alternatives-for-the-owners-decision), is the read of a declared dotenv file on an unresponsive
+  mount, which the lookup waits for.
 - **Built-ins:** each implements both methods, except `KeyringProvider` under Keychain option (b). Its existing
   `find_gem` and `get_gem` delegate to them with `Deadline.unbounded()`, so direct callers keep today's behavior,
   except `KeyringProvider` under Keychain option (a), whose native read never shows a prompt.
 - **Unbounded means today's calls.** When `deadline.expires_at` is `math.inf`, a built-in makes exactly the
-  calls it makes at `4438234`, with today's arguments. `_request_timeout`, a `deadline=` argument to
-  `_run_cli`, and the `asyncio.wait_for` wrapper are added only for a finite deadline.
+  calls it makes at `4438234`, with today's arguments. `_preload_content` and `_request_timeout`, a `deadline=`
+  argument to `_run_cli`, and the `asyncio.wait_for` wrapper are added only for a finite deadline.
 - **New: `deadline_capability(provider_type: type) -> CapabilityObservation`,** with source
   `EvidenceSource.PROVIDER_CLASS`:
   - an input that is not a class raises `TypeError(DEADLINE_CAPABILITY_INPUT_ERROR.format(value=...))`;
@@ -181,8 +197,8 @@ Out of scope:
      `ProviderLookupError` are handled exactly as in today's loop. A `TimeoutError` from the wait becomes
      `LookupIssue(provider, instance_id, TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)`.
   5. Shut down with `executor.shutdown(wait=True, cancel_futures=True)`. Because every running call is bounded,
-     except under the two known limits named in the Purpose, this wait is bounded too. A provider that breaks its
-     contract and overruns is caught by the acceptance cases, not hidden by a non-waiting shutdown.
+     except the one dotenv read the Purpose names under dotenv option (a), this wait is bounded too. A provider
+     that breaks its contract and overruns is caught by the acceptance cases, not hidden by a non-waiting shutdown.
 - **New: `HiddenGems._resolve_within(self, name: str, *, provider: str | None, target: str | None, criteria:
   Mapping[str, Any] | None, choice: str | None, deadline: Deadline) -> GemReference`,** private. `choice` is the
   parameter `GAL-chooser` (plan 4.3) adds to `resolve_gem`. It holds today's body of `resolve_gem` and calls
@@ -197,12 +213,20 @@ Out of scope:
 Built-in deadline handling:
 
 - **Kubernetes:** before each namespace request, if `deadline.expired()`, it stops and raises
-  `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION, matches)` with the matches so far. Otherwise it calls
-  `read_namespaced_secret(..., _request_timeout=deadline.remaining())`. Several namespaces share one deadline;
-  none gets a fresh one. Known limit, checked in `kubernetes` 36.0.3: a numeric `_request_timeout` becomes
-  `urllib3.Timeout(total=...)` (`kubernetes/client/rest.py`). urllib3 2.8.0 applies it to the connection and
-  to each socket read, so a server that sends bytes slowly but steadily can overrun the deadline. The
-  deadline check before each namespace request still stops further requests.
+  `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION, matches)` with the matches so far. Otherwise it reads
+  the Secret with the new private method `_read_secret_within(self, name: str, namespace: str, deadline: Deadline)
+  -> V1Secret`, which `find_gem_within` and `get_gem_within` both use. It:
+  - calls `read_namespaced_secret(..., _preload_content=False, _request_timeout=(slice, slice))`, with
+    `slice = min(deadline.remaining(), KUBE_READ_SLICE_SECONDS)`;
+  - reads the body with `response.read1(KUBE_READ_CHUNK_BYTES)`, which returns after at most one socket read,
+    checking `deadline.expired()` before each chunk;
+  - on expiry, closes the response and raises `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)`;
+    `find_gem_within` catches it and raises it again with the matches found in earlier namespaces, as its loop
+    keeps partial matches today;
+  - deserializes the body into `V1Secret` with the client's `ApiClient.deserialize`.
+
+  Total bound: the deadline plus one slice. Several namespaces share one deadline; none gets a fresh one. With an
+  unbounded deadline, the call stays exactly as today, with no `_preload_content` and no `_request_timeout`.
 - **1Password CLI:** `subprocess.run(..., timeout=min(CLI_TIMEOUT_SECONDS, deadline.remaining()))`. On timeout,
   `run` kills the `op` process and waits for it, so the process has ended when the call returns.
 - **1Password SDK:** `asyncio.run(asyncio.wait_for(self._find_sdk(...), deadline.remaining()))`. The SDK
@@ -217,9 +241,15 @@ Built-in deadline handling:
   1Password SDK cannot stop at a lookup deadline"` and `ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION = "Install or
   enable the 1Password CLI for this account, then retry"`.
 - **Keychain:** per the [Keychain decision](#alternatives-for-the-owners-decision).
-- **dotenv:** reads one local file and checks the deadline before reading. Known limit: a declared file on an
-  unresponsive network mount can block inside the operating system. The walk guard of `GAL-expand` keeps
-  discovered and expanded files off mounts, but a plain path the user declares on a share is their choice.
+- **dotenv:** reads one local file and checks the deadline before reading. Known limit: the read of a declared
+  file on an unresponsive network mount can block inside the operating system and cannot be bounded in a thread.
+  The walk guard of `GAL-expand` keeps discovered and expanded files off mounts, but a plain path the user declares
+  on a share is their choice. The owner's [dotenv decision](#alternatives-for-the-owners-decision) settles this
+  case: under option (a), the lookup waits for that read; under option (b), `DotEnvProvider.find_gem_within` and
+  `get_gem_within` read a declared file whose device differs from the home directory's through
+  `run_in_child(_read_dotenv_file, (path,), deadline)` under a finite deadline, and the lookup returns at the
+  deadline plus grace. `_read_dotenv_file(path: Path) -> dict[str, str]` is a module-level function of
+  `dotenv_provider.py`, so the child can import it by name.
 
 ## Abstraction-extension gate
 
@@ -247,7 +277,8 @@ baseline is commit `4438234`.
 - **Status:** optional base class. A provider that subclasses it MUST implement both methods.
 - **Behavior:** each call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON`, within
   `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`, and every operation it starts ends within that
-  time.
+  time, except, under option (a) of the [dotenv decision](#alternatives-for-the-owners-decision), the read of a
+  declared dotenv file on an unresponsive mount.
 - **Why it is not a parallel contract:** it subclasses `AbstractGemProvider` and adds two methods under new
   names. `find_gem` and `get_gem` stay the MUST members with their signatures unchanged, and a built-in's
   `find_gem` and `get_gem` delegate to the new methods with `Deadline.unbounded()`. A provider that does not
@@ -257,6 +288,8 @@ baseline is commit `4438234`.
   Keychain option (a).
 - **Actual caller:** `HiddenGems._inspect_within`, step 3, and the `HiddenGems.dig_gem` read.
 - **Acceptance tests:** `test_builtin_providers_stop_at_the_deadline`,
+  `test_kubernetes_slow_steady_response_stops_at_the_deadline`,
+  `test_dotenv_read_on_another_device_runs_in_a_bounded_child` under dotenv option (b),
   `test_parallel_lookup_never_exceeds_lookup_workers`, and `test_parallel_merge_ignores_completion_order`.
 
 #### `deadline_capability` and `Capability.DEADLINE`
@@ -311,22 +344,34 @@ baseline is commit `4438234`.
   `test_namespace_only_preference_resolves_unique_cluster`, and
   `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`.
 
-#### `HiddenGems._find_in_child` and `HiddenGems._get_in_child`
+#### `run_in_child`, `HiddenGems._find_in_child`, and `HiddenGems._get_in_child`
 
-- **Signature:** `_find_in_child(self, record: DetectedProvider, provider_type: type, name: str, criteria:
+- **Signature:** `run_in_child(target: Callable[..., T], args: tuple[Any, ...], deadline: Deadline) -> T`, in the
+  new module `src/hiddengems/child_runner.py`: it runs `target(*args)` in a child process and returns its
+  result over a pipe. `target` must be a module-level function that the child can import by name. The router's
+  wrappers are `_find_in_child(self, record: DetectedProvider, provider_type: type, name: str, criteria:
   Mapping[str, Any] | None, deadline: Deadline) -> tuple[GemReference, ...]` and `_get_in_child(self, record:
   DetectedProvider, provider_type: type, reference: GemReference, deadline: Deadline) -> list[Gem]`, private
   methods of `HiddenGems`.
-- **Status:** MUST ADD under non-cooperative option (b) only.
-- **Behavior:** each starts a child from `multiprocessing.get_context(CHILD_START_METHOD)`. The child builds the
+- **Status:** MUST ADD under non-cooperative option (b) or dotenv option (b) only.
+- **Behavior:** `run_in_child` starts a child from `multiprocessing.get_context(CHILD_START_METHOD)`, and the two
+  wrappers call it. The child builds the
   instance with `GemProvider.create(record, types=(provider_type,))` from `GAL-discovery`; the class crosses the
   pipe by module and qualified name. At `deadline.remaining() + LOOKUP_SHUTDOWN_GRACE_SECONDS` the child is
   terminated and joined, and `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)` is raised. A class that
-  pickle cannot reference by name is handled as under option (a).
-- **Implementation owner:** `hidden_gems.py`.
-- **Actual caller:** `HiddenGems._inspect_within`, step 3, calls `_find_in_child`; the `HiddenGems.dig_gem` read
-  calls `_get_in_child`, both for an `UNSUPPORTED` provider.
-- **Acceptance tests:** `test_non_cooperative_provider_never_runs_unbounded`.
+  pickle cannot reference by name is handled as under option (a). `_get_in_child` sends the values over the pipe.
+  A value that pickle cannot send, an IO stream or any other unpicklable value, is never materialized: the child
+  sends nothing for it, and `_get_in_child` raises
+  `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`. This is the recommended option of the
+  [child read decision](#alternatives-for-the-owners-decision). Under dotenv option (b), `DotEnvProvider` calls
+  `run_in_child` itself for a declared file on another device; no router code branches on a provider.
+- **Implementation owner:** `child_runner.py` for `run_in_child`; `hidden_gems.py` for the two wrappers.
+- **Actual caller:** `HiddenGems._inspect_within`, step 3, calls `_find_in_child`, and the `HiddenGems.dig_gem`
+  read calls `_get_in_child`, both for an `UNSUPPORTED` provider; under dotenv option (b),
+  `DotEnvProvider.find_gem_within` and `get_gem_within` call `run_in_child` for a declared file on another
+  device.
+- **Acceptance tests:** `test_non_cooperative_provider_never_runs_unbounded` and
+  `test_child_read_reports_declared_transport_rejection`.
 
 #### Keychain interaction-not-allowed status
 
@@ -356,10 +401,11 @@ proposal. `B` loses no member and changes no signature. The factory is unchanged
 | Provider | `deadline_capability` | How it stops at the deadline |
 | --- | --- | --- |
 | `OnePasswordProvider` | `SUPPORTED` | CLI timeout kills `op`; SDK under `wait_for` |
-| `DotEnvProvider` | `SUPPORTED` | checks the deadline before reading |
+| `DotEnvProvider`, dotenv option (a) | `SUPPORTED` | checks the deadline; waits on an unresponsive mount |
+| `DotEnvProvider`, dotenv option (b) | `SUPPORTED` | checks the deadline; reads a file on another device in a child |
 | `KeyringProvider`, Keychain option (a) | `SUPPORTED` | a non-interactive query |
 | `KeyringProvider`, Keychain option (b) | `UNSUPPORTED` | the non-cooperative path |
-| `KubernetesProvider` | `SUPPORTED` | `_request_timeout` from the remaining time |
+| `KubernetesProvider` | `SUPPORTED` | `_read_secret_within`: sliced timeouts and a chunked body read |
 
 - **Applicable contract,** `C` restricted to the classes each provider subclasses:
   - `OnePasswordProvider` and `KubernetesProvider`: `AbstractGemProvider`, `DeadlineAwareGemProvider`;
@@ -386,8 +432,8 @@ None. Each of the nine baseline routing tests, traced through the new code:
   attributes as the read path, initialized from the new module constants.
 - **Calling a provider directly, with an unbounded deadline:**
   - `test_kubernetes_keeps_confirmed_match_when_other_namespace_is_unchecked`: its fake
-    `read_secret(*, name, namespace)` accepts no `_request_timeout`. With an unbounded deadline none is
-    passed;
+    `read_secret(*, name, namespace)` accepts neither `_preload_content` nor `_request_timeout`. With an unbounded
+    deadline neither is passed;
   - `test_onepassword_preserves_match_when_another_account_is_unchecked`: its fake `_run_cli(*args)` accepts no
     keyword. With an unbounded deadline none is passed;
   - `test_sdk_vault_preference_filters_duplicate_titles`: with an unbounded deadline, `_find_sdk` runs under
@@ -419,6 +465,9 @@ No new class. Each situation reuses an existing one, under the overview's except
   so `dig_gem` raises `IncompleteGemLookupError`, as for any unchecked provider.
 - **A non-cooperative provider under option (a)**, or under option (b) one whose class pickle cannot reference by
   name, becomes a `LookupIssue` with `NO_DEADLINE_REASON`, not an exception.
+- **A value that cannot cross the child-process boundary**, under non-cooperative option (b), makes
+  `_get_in_child` raise `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`; the child sends
+  nothing for it. This is the recommended option of the child read decision.
 - **`deadline_capability` with an input that is not a class** raises `TypeError`, as `write_capability` does.
 - **The 1Password CLI's `subprocess.TimeoutExpired`** is translated to `ProviderLookupError`, as
   `onepassword_provider.py` already does today.
@@ -441,7 +490,10 @@ In `src/hiddengems/constants/lookup.py`, beside the constants the overview alrea
 - `NO_DEADLINE_REASON: Final[str] = "Provider cannot honor a lookup deadline"` and
   `NO_DEADLINE_NEXT_ACTION: Final[str] = "Subclass DeadlineAwareGemProvider"`, used under non-cooperative
   option (a) and, under option (b), for a class that pickle cannot reference by name.
-- `CHILD_START_METHOD: Final[str] = "spawn"`, used only under non-cooperative option (b).
+- `CHILD_START_METHOD: Final[str] = "spawn"`, used only under non-cooperative option (b) or dotenv option (b).
+- `CHILD_TRANSPORT_REASON: Final[str] = "The value cannot cross the child-process boundary"` and
+  `CHILD_TRANSPORT_NEXT_ACTION: Final[str] = "Ask the provider's author to subclass DeadlineAwareGemProvider"`,
+  used under non-cooperative option (b) for a value that pickle cannot send, per the child read decision.
 
 In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants. Under
 `GAL-plugin` option one, which adds no write constants, this feature creates the module:
@@ -462,6 +514,12 @@ In `gems/onepassword_constants.py`, which `GAL-settings` creates:
   retry"`, used by `OnePasswordProvider` for an SDK-only instance under a finite deadline if
   `test_onepassword_sdk_work_ends_at_the_deadline` does not pass.
 
+In `gems/kubernetes_constants.py`, which `GAL-settings` creates:
+
+- `KUBE_READ_SLICE_SECONDS: Final[float] = 1.0` and `KUBE_READ_CHUNK_BYTES: Final[int] = 65_536`, used by
+  `_read_secret_within` under a finite deadline: the slice caps each connect and socket read, and each
+  `response.read1` call reads at most one chunk.
+
 In `src/hiddengems/gems/keychain_constants.py`, which `GAL-settings` creates, under Keychain option (a) only:
 
 - `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`: the new bridge status, mirroring
@@ -479,8 +537,9 @@ standard library.
 
 ## Behavior and compatibility
 
-- **Lookups run in parallel and are bounded.** Behavior change: a lookup that hangs today now ends with an
-  Incomplete result naming the provider that ran out of time.
+- **Lookups run in parallel and are bounded,** except, under dotenv option (a), the read of a declared file on an
+  unresponsive mount. Behavior change: a lookup that hangs today now ends with an Incomplete result naming the
+  provider that ran out of time.
 - **The result is unchanged in shape and order.** `LookupResult` is the same, and matches stay in record order.
 - **`AbstractGemProvider` gains no required member.** `DeadlineAwareGemProvider` is an additional interface, and
   `find_gem` and `get_gem` keep their signatures.
@@ -509,8 +568,19 @@ A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
   instance with `GemProvider.create(record, types=(provider_type,))` from `GAL-discovery`; the class crosses the
   pipe by module and qualified name; a class that pickle cannot reference by name is handled as under option (a).
   Bounded and compatible, at the cost of a process per call, and values for `dig_gem` crossing a local pipe
-  between the user's own processes. Recommended: it keeps every registered provider usable.
+  between the user's own processes; a value that pickle cannot send is handled per the child read decision below.
+  Recommended: it keeps every registered provider usable.
 - A third option, running it without a bound, fails the gate, so it is not offered.
+
+A child read, under non-cooperative option (b), of a value that cannot cross the pipe, such as an IO stream.
+Rejecting it narrows what an `UNSUPPORTED` provider may return under that option, so the owner decides:
+
+- **(a) Reject the value with the declared error.** The child sends nothing for the value, and `_get_in_child`
+  raises `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`. Recommended: nothing secret is
+  written anywhere.
+- **(b) Hand the stream over in a temporary file.** The child writes the stream to a mode-0600 temporary file, and
+  the parent returns an open file object the caller owns, at the cost of the secret at rest on disk. Any other
+  value that cannot cross the pipe still gets the declared error of (a).
 
 The Keychain, whose query can wait on an authorization prompt:
 
@@ -523,6 +593,17 @@ The Keychain, whose query can wait on an authorization prompt:
 - **(b) Treat the Keychain as non-cooperative.** `KeyringProvider` does not subclass `DeadlineAwareGemProvider`
   and is `UNSUPPORTED`. It goes through the chosen non-cooperative path, and its prompt can still appear until the
   deadline ends it.
+
+The read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread:
+
+- **(a) Accept a weaker contract for that named case.** `SUPPORTED` means bounded, except a read of a declared
+  file on an unresponsive mount, which the lookup waits for.
+- **(b) Read a file on another device in a bounded child.** A declared dotenv file whose device differs from the
+  home directory's (`os.stat(path).st_dev != os.stat(Path.home()).st_dev`) is read through the child runner of
+  non-cooperative option (b) under a finite deadline, so the lookup returns at the deadline plus grace. A child
+  blocked inside the kernel is terminated, and reaped when the operating system releases it. `SUPPORTED` then
+  means bounded, with no exception. Recommended: it keeps the owner's gate, with no provider execution unbounded
+  after timeout.
 
 ## Acceptance cases
 
@@ -569,6 +650,11 @@ In `tests/test_hidden_gems_routing.py`:
   - Expected under option (b): its child process has ended (`exitcode` is set) when `inspect_gem` returns, within
     0.2 seconds plus the grace.
   - Under either option, no lookup thread is left alive.
+- `test_child_read_reports_declared_transport_rejection`, under non-cooperative option (b) and child read
+  option (a).
+  - Input: an `UNSUPPORTED` provider whose `get_gem` returns an open stream.
+  - Expected: `_get_in_child` raises `ProviderLookupError` with `CHILD_TRANSPORT_REASON`, and the child process has
+    ended.
 - `test_lookup_with_no_records_skips_the_pool`.
   - Input: `HiddenGems(providers=(), config_path=tmp_path / "missing.json")`.
   - Expected: `dig_gem` raises `GemNotFoundError`, as today, and no thread whose name starts with
@@ -586,9 +672,9 @@ In `tests/contract/test_provider_contract.py`:
   - Expected: the call ends within the bound, and no SDK task or thread is alive afterwards.
 - `test_builtin_providers_stop_at_the_deadline`. Each built-in uses a fake of the I/O it performs, and the test
   measures when the work ends, not whether a timeout argument was passed:
-  - **Kubernetes:** a fake API whose `read_namespaced_secret` sleeps for the `_request_timeout` it receives, over
-    three namespaces. Expected: no request starts after the deadline; total time is within the bound; the
-    `ProviderLookupError` carries the matches found before it.
+  - **Kubernetes:** a fake API whose `read_namespaced_secret` sleeps for the slice it receives in
+    `_request_timeout`, over three namespaces. Expected: no request starts after the deadline; total time is within
+    the bound; the `ProviderLookupError` carries the matches found before it.
   - **1Password CLI:** a fake `op` script in `tmp_path` that sleeps for 5 seconds and records its process id.
     Expected: the call ends within the bound, and that process no longer exists.
   - **1Password SDK:** a fake client whose coroutine waits on an event that is never set. Expected: the call ends
@@ -596,6 +682,13 @@ In `tests/contract/test_provider_contract.py`:
   - **Keychain, under option (a):** the existing fake library from `tests/test_hidden_gems_keyring.py`, extended
     to return `KEYCHAIN_INTERACTION_NOT_ALLOWED`. Expected: the call returns at once, UNKNOWN, with
     `KEYCHAIN_LOCKED_NEXT_ACTION`.
+- `test_kubernetes_slow_steady_response_stops_at_the_deadline`.
+  - Input: a fake response whose `read1` returns one byte every 0.05 seconds for 10 seconds.
+  - Expected: the call ends within the deadline plus one slice.
+- `test_dotenv_read_on_another_device_runs_in_a_bounded_child`, under dotenv option (b).
+  - Input: a declared dotenv file with a patched `st_dev` that differs from the home directory's, and a fake read
+    that blocks.
+  - Expected: the lookup returns within the bound.
 
 ## Dependencies on other features
 
@@ -603,10 +696,11 @@ In `tests/contract/test_provider_contract.py`:
   - `GAL-plugin`, for `Capability`, `CapabilityObservation`, `EvidenceSource.PROVIDER_CLASS`, and
     `constants/capability.py`;
   - `GAL-settings`, which introduces `constants/lookup.py` with `LOOKUP_TIMEOUT_SECONDS`,
-    `gems/keychain_constants.py`, and `gems/onepassword_constants.py`;
+    `gems/keychain_constants.py`, `gems/kubernetes_constants.py`, and `gems/onepassword_constants.py`;
   - `GAL-scope` (plan 4.1) and `GAL-chooser` (plan 4.3), whose `target` and `choice` parameters `_inspect_within` and
     `_resolve_within` take;
-  - `GAL-discovery` under non-cooperative option (b), for `GemProvider.create(record, types=(provider_type,))`.
+  - `GAL-discovery` under non-cooperative option (b) or dotenv option (b), for
+    `GemProvider.create(record, types=(provider_type,))`.
 - **Required by:** `GAL-secure-cache`, which uses `Deadline`, its injected clock, `_resolve_within`,
   `get_gem_within`, and `TIMEOUT_NEXT_ACTION`.
 - **Overlaps:** Keychain option (a) changes the native bridge, as the proposed Keychain existence feature does.
