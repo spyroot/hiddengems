@@ -126,7 +126,7 @@ Out of scope:
 ~ src/hiddengems/constants/platform.py          online-only file markers
 ~ src/hiddengems/gems/dotenv_constants.py       DotEnvWalkOutcome enum; name, reason, and setting-key constants
 ~ src/hiddengems/gems/dotenv_provider.py        expand(); _scan returns DotEnvWalkOutcome and applies the guard
-~ src/hiddengems/gems/kubernetes_constants.py   KubeWalkOutcome and KubeFileIssue enums; KUBECONFIG_PATHS_SETTING
+~ src/hiddengems/gems/kubernetes_constants.py   KubeWalkOutcome and KubeFileIssue enums; setting-key constants
 ~ src/hiddengems/gems/k8s_provider.py           expand(); walk and file checks return the enums
 ~ tests/test_hidden_gems_dotenv.py              dotenv and pattern-walk cases
 ~ tests/test_hidden_gems_routing.py             Kubernetes and router cases
@@ -264,7 +264,8 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
 
 - `HiddenGems.__init__`, in the target translation step of `GAL-targets`, calls
   `GemProvider.expand(target.provider, settings, types=types)` for each declared target, with the same `types`
-  it passes to `GemProvider.detect` (`GAL-discovery`).
+  it passes to `GemProvider.detect` (`GAL-discovery`). `types=types` is passed only when the configuration
+  allowlists third-party types; otherwise the call is made without it.
 - **Naming:** each result becomes one detection candidate, named the target name, `TARGET_NAME_SEPARATOR`, and
   the file's path relative to the pattern root. A single result from a plain path keeps the target's name.
 - **Unchecked parts:** a result carrying `SCAN_ISSUE_SETTING` becomes today's pseudo-instance record, so a
@@ -317,7 +318,8 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
 
 - **New:** `expand(cls, settings)`.
   - For a pattern `kubeconfig`, it calls `walk_pattern` and returns one `{KUBECONFIG_PATHS_SETTING: [file]}` per
-    local file, with the target's `context` and `namespace` copied into each, and a `PRESENCE_ISSUE_SETTING`
+    local file, with the target's `CONTEXT_SETTING` and `NAMESPACE_SETTING` values copied into each, and a
+    `PRESENCE_ISSUE_SETTING`
     mapping with `Presence.NOT_LOCAL` per online-only file.
   - The size bound applies, as above.
   - If the outcome is neither `COMPLETE` nor `ROOT_MISSING`, it also returns
@@ -468,6 +470,9 @@ None. The baseline tests that touch the changed walkers keep their expectations:
 - `tests/test_hidden_gems_dotenv.py:494` compares the record setting `access_issue` with
   `"Dotenv file is not readable"`. The setting keeps that text for an `UNREADABLE` file; only the
   `_DotEnvPathRecord` field and the provider attribute become `presence`.
+- `tests/test_hidden_gems_dotenv.py:499` expects a lookup on an unreadable file to raise with
+  `match="not readable"`. A lookup on a `Presence.UNREADABLE` record raises `ProviderLookupError` with today's
+  text, `"Dotenv file is not readable"`, so that test keeps working unchanged.
 - `tests/test_hidden_gems_dotenv.py:470` patches `DotEnvProvider._MAX_SCAN_ENTRIES`, and
   `tests/test_hidden_gems_routing.py:278,296,297` patch `KubernetesProvider._MAX_AUTO_CONFIG_BYTES` and
   `_MAX_DIRECTORY_ENTRIES`. They keep working, because `GAL-settings` keeps the class attributes as the read
@@ -550,6 +555,8 @@ therefore needs no new entry for this feature.
     - `CLOUD_SYNC_SKIPPED = "Dotenv discovery skipped a cloud-sync folder"`.
 - In `src/hiddengems/gems/kubernetes_constants.py`:
   - `KUBECONFIG_PATHS_SETTING: Final[str] = "kubeconfig_paths"`, the setting key of a target's kubeconfig files;
+  - `CONTEXT_SETTING: Final[str] = "context"` and `NAMESPACE_SETTING: Final[str] = "namespace"`, the setting
+    keys copied from the target into each expanded mapping; `GAL-remember` imports `CONTEXT_SETTING`;
   - `class KubeWalkOutcome(StrEnum)`, with these members:
     - `COMPLETE = "complete"`;
     - `LINKED_OR_MOUNTED = "Automatic kubeconfig directory is a link or mount"`;
@@ -635,8 +642,9 @@ Cases:
   - Input: the patched home holding `.env.local`; the pattern `~/.env*`.
   - Expected: one instance.
 - `test_cloud_sync_folder_is_skipped_and_reported`.
-  - Input: the patched home with `Dropbox/app/.env` and `work/.env`; a pattern rooted at the patched home's
-    `work` parent that would otherwise reach both.
+  - Input: the home directory patched to `<tmp>/home`, holding `Dropbox/app/.env` and `work/.env`; the pattern
+    `<tmp>/**/.env`, rooted at `<tmp>`, which is neither the home directory nor a filesystem root, and would
+    otherwise reach both files.
   - Expected:
     - only `work/.env` is found;
     - the walk outcome is `CLOUD_SYNC_SKIPPED`, naming `Dropbox`;
@@ -718,8 +726,11 @@ Cases:
     `MAX_AUTO_CONFIG_BYTES`, and provides the settings classes;
   - `GAL-discovery`, for `types`;
   - `GAL-plugin`, whose `tests/contract/test_provider_contract.py` holds two of its cases.
-- **Required by:** `GAL-kube-contexts`, which splits each expanded kubeconfig file by context. It uses
-  `TARGET_NAME_SEPARATOR` in place of its own separator constant, and reads only files `is_local` accepts.
+- **Required by:**
+  - `GAL-kube-contexts`, which splits each expanded kubeconfig file by context. It uses `TARGET_NAME_SEPARATOR` in
+    place of its own separator constant, and reads only files `is_local` accepts;
+  - `GAL-remember` (plan 6.1), which imports `SCAN_ISSUE_SETTING` so that an incomplete detection is never
+    remembered, and `CONTEXT_SETTING` for its Kubernetes revalidation.
 - **Open questions it answers in part:**
   - `GAL-scan-depth`: `depth` and the budgets are the per-target knobs; how a caller selects a profile per call
     stays open.
