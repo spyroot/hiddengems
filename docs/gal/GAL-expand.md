@@ -1,8 +1,23 @@
 # GAL-expand: controlled expansion of a declared target
 
-Status: proposal, revision 3. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 4. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 4 changes revision 3 in six ways:
+
+- **The gate declares two more extensions:** the target expansion in `HiddenGems.__init__`, and the settings
+  keys the providers gain, which `GAL-settings` would otherwise reject at config load. Every gate entry names
+  its acceptance tests, the provider table names the applicable contract, and the baseline tests that patch
+  class limits are listed.
+- **No `None` stands for a state.** The provider fields that used `None` for a complete walk or a readable file
+  become `walk_outcome` and `presence`, and `Presence` gains `UNREADABLE`.
+- **An online-only file is a detected instance whose `find_gem` refuses,** with `KubeFileIssue.NOT_LOCAL` or
+  `DOTENV_NOT_LOCAL_REASON`, without opening the file.
+- **No inline literals.** Refusal messages and setting keys are named constants, the pattern budget derives
+  from the discovery budget, and the online-only markers move to `constants/platform.py`.
+- **Detection records from one target are ordered by `instance_id`.**
+- **The dependencies name `GAL-settings` and `GAL-plugin`.**
 
 Revision 3 changes revision 2 in four ways:
 
@@ -93,11 +108,12 @@ Out of scope:
 ```text
 ~ src/hiddengems/abstract_provider.py           expand() hook with its default
 ~ src/hiddengems/abstraction.py                 Presence enum
-~ src/hiddengems/gem_provider.py                GemProvider.expand dispatches to the provider class
+~ src/hiddengems/gem_provider.py                GemProvider.expand dispatches; the unknown-type message moves out
 ~ src/hiddengems/hidden_gems.py                 declared targets pass through expand(); empty ones reported ABSENT
 + src/hiddengems/pattern_walk.py                bounded, guarded pattern walk shared by both providers
-~ src/hiddengems/constants/config.py            pattern and guard constants
-~ src/hiddengems/gems/dotenv_constants.py       DotEnvWalkOutcome enum, DEFAULT_DOTENV_NAMES
+~ src/hiddengems/constants/config.py            pattern, guard, setting-key, and message constants
+~ src/hiddengems/constants/platform.py          online-only file markers
+~ src/hiddengems/gems/dotenv_constants.py       DotEnvWalkOutcome enum, DEFAULT_DOTENV_NAMES, DOTENV_NOT_LOCAL_REASON
 ~ src/hiddengems/gems/dotenv_provider.py        expand(); _scan returns DotEnvWalkOutcome and applies the guard
 ~ src/hiddengems/gems/kubernetes_constants.py   KubeWalkOutcome and KubeFileIssue enums
 ~ src/hiddengems/gems/k8s_provider.py           expand(); walk and file checks return the enums
@@ -114,7 +130,8 @@ Out of scope:
 A declared dotenv `path` or Kubernetes `kubeconfig` is a pattern when any path segment contains `*`, `?`, or `[`.
 
 - **Plain path:** names exactly one file and is never expanded.
-  - If it names a directory, `expand()` raises `ValueError` naming the target and suggesting `<dir>/*`.
+  - If it names a directory, `expand()` raises `ValueError` with `PLAIN_PATH_IS_DIRECTORY_MESSAGE`, which names
+    the target and suggests `<dir>/*`.
   - If it does not exist, the target is reported ABSENT.
 - **Pattern path:**
   - `~` is expanded first.
@@ -139,8 +156,9 @@ A walk must never pull a cloud-synced folder into detection. Listing a synced tr
 enumerate it remotely, and reading an online-only file forces a download. A 4 TB Dropbox folder must cost nothing.
 
 - **Tree patterns need a specific root.** A pattern whose root is the home directory, a filesystem root (`/`), or
-  a drive root, and that contains `**`, raises `ValueError` naming the target. A single-level pattern such as
-  `~/.env*` stays allowed, because it lists one directory and descends nowhere.
+  a drive root, and that contains `**`, raises `ValueError` with `TREE_PATTERN_ROOT_MESSAGE`, naming the
+  pattern. A single-level pattern such as `~/.env*` stays allowed, because it lists one directory and descends
+  nowhere.
 - **Cloud-sync folders are never entered** unless the pattern root is itself inside one. If the user names a
   directory inside Dropbox on purpose, that is the user's controlled choice. The folders are
   `CLOUD_SYNC_DIRECTORIES`, relative to the home directory:
@@ -156,9 +174,11 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
   - on macOS, `st_flags & MACOS_SF_DATALESS`;
   - on Windows, `st_file_attributes` with `FILE_ATTRIBUTE_OFFLINE` or `WINDOWS_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`.
 
-  The file is reported UNKNOWN with `KubeFileIssue.NOT_LOCAL`, or the dotenv equivalent, and the next action
-  "make the file available offline, then re-run". Linux has no portable marker, so the cloud-folder rule is the
-  protection there.
+  The file is reported UNKNOWN with `KubeFileIssue.NOT_LOCAL`, or `Presence.NOT_LOCAL` on the dotenv record, and
+  the next action `NOT_LOCAL_NEXT_ACTION`. It becomes a `DetectedProvider` with
+  `ProviderState.DETECTED` whose `find_gem` raises `ProviderLookupError(reason, NOT_LOCAL_NEXT_ACTION)` without
+  opening the file. The reason is `KubeFileIssue.NOT_LOCAL` for a kubeconfig, or `DOTENV_NOT_LOCAL_REASON` for a
+  dotenv file. Linux has no portable marker, so the cloud-folder rule is the protection there.
 - **Network mounts are never crossed.** An NFS or SMB share mounted anywhere under the home directory is a mount
   point (`os.path.ismount`), and no walk crosses a mount point. A user who wants files on that share sets the
   pattern root inside it, which is the explicit, advanced-user form of control; detection never reaches the
@@ -176,8 +196,11 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
 - **`max_seconds`:** wall time, above 0 and at most `PATTERN_MAX_SECONDS`; default `PATTERN_MAX_SECONDS`.
 - **Size:** for Kubernetes, a matched file above `MAX_AUTO_CONFIG_BYTES` is skipped with
   `KubeFileIssue.SIZE_LIMIT`.
-- **Out-of-range values:** raise `ValueError` naming the key. No value is clamped silently.
-- **Order:** breadth first, with entries sorted by name at each level, so results are deterministic.
+- **Out-of-range values:** raise `ValueError` with `PATTERN_BOUND_MESSAGE`, naming the key and its range. The
+  settings classes of `GAL-settings` check them at config load. No value is clamped silently.
+- **Order:** breadth first, with entries sorted by name at each level, so results are deterministic. Detection
+  records from one target are ordered by `instance_id`, the fourth key of `docs/README.md` "Detection result";
+  breadth-first order only decides which entries the budget reaches.
 - **A walk cut short** by a budget, an unreadable directory, or a skipped cloud folder, ends with the matching
   `PatternWalkOutcome`. The target then also yields a pseudo-instance record carrying that outcome, so a lookup in
   scope ends in `IncompleteGemLookupError`, as discovery does today.
@@ -212,16 +235,16 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
 - `cloud_sync_roots(home: Path) -> tuple[Path, ...]`: `CLOUD_SYNC_DIRECTORIES` resolved under `home`, computed at
   run time.
 - `walk_pattern(pattern: str, *, depth: float, max_entries: int, max_seconds: float) -> PatternWalkResult`, which
-  implements the grammar, bounds, and guard above. It raises `ValueError` for a tree pattern with a home or
-  filesystem root.
+  implements the grammar, bounds, and guard above. It raises `ValueError` with `TREE_PATTERN_ROOT_MESSAGE`,
+  formatted with `pattern` and `root`, for a tree pattern with a home or filesystem root.
 
 `src/hiddengems/gem_provider.py`, the factory:
 
 - **New:** `@classmethod expand(cls, provider: str, settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]`.
   It finds the class in `provider_types` whose `name` equals `provider`, by the lookup `GemProvider.create`
   uses, and returns that class's `expand(settings)`. An unregistered name raises
-  `ValueError(f"Unknown provider type: {provider!r}")`, the message `create` raises today
-  (`gem_provider.py:81-82`).
+  `ValueError(UNKNOWN_PROVIDER_TYPE_MESSAGE.format(provider=provider))`, the message `create` raises today
+  (`gem_provider.py:81-82`). The literal at `gem_provider.py:82` moves to that constant, and `create` uses it too.
 
 `src/hiddengems/hidden_gems.py`, the caller:
 
@@ -229,10 +252,12 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
   `GemProvider.expand(target.provider, settings)` for each declared target.
 - **Naming:** each result becomes one detection candidate, named the target name, `TARGET_NAME_SEPARATOR`, and
   the file's path relative to the pattern root. A single result from a plain path keeps the target's name.
-- **Unchecked parts:** a result carrying `scan_issue` becomes today's pseudo-instance record, so a lookup in
-  scope ends in `IncompleteGemLookupError`.
-- **Online-only files:** a result carrying `presence_issue` becomes an instance whose lookups are UNKNOWN, with
-  the next action "make the file available offline, then re-run".
+- **Unchecked parts:** a result carrying `SCAN_ISSUE_SETTING` becomes today's pseudo-instance record, so a
+  lookup in scope ends in `IncompleteGemLookupError`.
+- **Online-only files:** a result carrying `PRESENCE_ISSUE_SETTING` becomes a `DetectedProvider` with
+  `ProviderState.DETECTED` whose `find_gem` raises `ProviderLookupError(reason, NOT_LOCAL_NEXT_ACTION)` without
+  opening the file, so its lookups are UNKNOWN. The reason is `KubeFileIssue.NOT_LOCAL` for a kubeconfig, or
+  `DOTENV_NOT_LOCAL_REASON` for a dotenv file.
 - **Zero results:** a target that expands to nothing is listed in `LookupResult.providers` with
   `ProviderState.ABSENT`, from `GAL-sdk-optional`. It is not added to `HiddenGems._unavailable`, whose
   "Configured provider was not detected" issue (`hidden_gems.py:133-143`) would make the lookup Incomplete for a
@@ -248,35 +273,57 @@ enumerate it remotely, and reading an online-only file forces a download. A 4 TB
 
 - **New:** `expand(cls, settings)`.
   - For a pattern `path`, it calls `walk_pattern`, filters the files with `_matches_names`, and returns one
-    `{"path": file}` per local file and one `{"path": file, "presence_issue": "not_local"}` per online-only file.
-    If the outcome is not `COMPLETE`, it also returns `{"scan_issue": outcome.value, "scan_root": root}`.
+    `{"path": file}` per local file and one `{"path": file, PRESENCE_ISSUE_SETTING: Presence.NOT_LOCAL}` per
+    online-only file. If the outcome is neither `COMPLETE` nor `ROOT_MISSING`, it also returns
+    `{SCAN_ISSUE_SETTING: outcome.value, SCAN_ROOT_SETTING: root}`. `ROOT_MISSING` returns nothing, so the
+    target is ABSENT.
   - For a plain file path, it returns the default.
-  - A pattern together with `backup_filename` raises `ValueError` naming the target, because one backup file
-    cannot serve several files.
+  - A pattern together with `backup_filename` raises `ValueError` with `PATTERN_BACKUP_MESSAGE`, naming the
+    target, because one backup file cannot serve several files.
 - **New:** `_matches_names(name: str, names: tuple[str, ...]) -> bool`, which returns
   `any(fnmatch.fnmatchcase(name, pattern) for pattern in names)`. It replaces `_is_dotenv_name`. With
   `DEFAULT_DOTENV_NAMES`, it accepts exactly the names accepted today.
 - **Changed:** `_scan` returns `tuple[tuple[Path, ...], DotEnvWalkOutcome]` instead of `str | None`, and skips
   cloud-sync folders with `DotEnvWalkOutcome.CLOUD_SYNC_SKIPPED`. `DotEnvWalkOutcome.COMPLETE` replaces `None`;
   the other members' values are today's exact messages, so existing pseudo-instance text does not change.
-- **Changed:** `_inspect_candidate` no longer drops a declared file that is missing. It returns
-  `_DotEnvPathRecord` with a new field `presence: Presence`, and `detect` lists a declared file that is `ABSENT`
-  in `LookupResult.providers` instead of skipping it.
+- **Changed:** `_inspect_candidate` no longer drops a declared file that is missing. In the `_DotEnvPathRecord`
+  it returns, the field `access_issue: str | None` (`dotenv_provider.py:207`) becomes `presence: Presence`:
+  `PRESENT` by default, `UNREADABLE` for a file that cannot be read. `detect` lists a declared file that is
+  `ABSENT` in `LookupResult.providers` instead of skipping it.
+- **Changed:** the attributes `scan_issue` and `access_issue` (`dotenv_provider.py:243-248`), where `None` means
+  a complete walk or a readable file, become `walk_outcome: DotEnvWalkOutcome | PatternWalkOutcome` (default
+  `DotEnvWalkOutcome.COMPLETE`) and `presence: Presence` (default `PRESENT`). The constructor keeps validating the
+  `scan_issue` and `access_issue` settings exactly as today. The record setting `scan_issue` stays a string,
+  present only on pseudo-instances.
 - **Settings it reads:** `path`, `names`, `depth`, `max_entries`, and `max_seconds`.
 
 `src/hiddengems/gems/k8s_provider.py`:
 
 - **New:** `expand(cls, settings)`.
   - For a pattern `kubeconfig`, it calls `walk_pattern` and returns one `{"kubeconfig_paths": [file]}` per local
-    file, with the target's `context` and `namespace` copied into each, and a `presence_issue` mapping per
-    online-only file.
+    file, with the target's `context` and `namespace` copied into each, and a `PRESENCE_ISSUE_SETTING` mapping
+    with `Presence.NOT_LOCAL` per online-only file.
   - The size bound applies, as above.
-  - If the outcome is not `COMPLETE`, it also returns `{"scan_issue": outcome.value, "scan_root": root}`.
+  - If the outcome is neither `COMPLETE` nor `ROOT_MISSING`, it also returns
+    `{SCAN_ISSUE_SETTING: outcome.value, SCAN_ROOT_SETTING: root}`. `ROOT_MISSING` returns nothing, so the target
+    is ABSENT.
 - **Changed:** `_directory_kubeconfigs` and `_paths` return `KubeWalkOutcome` and `KubeFileIssue` members instead
   of free-text warnings. The values are today's exact messages.
+- **Changed:** the attribute `scan_issue` (`k8s_provider.py:74`), where `None` means a complete walk, becomes
+  `walk_outcome: KubeWalkOutcome | KubeFileIssue | PatternWalkOutcome` (default `KubeWalkOutcome.COMPLETE`), the
+  enums whose values reach that setting. The record setting `scan_issue` stays a string, present only on
+  pseudo-instances.
 - **Changed:** a declared kubeconfig file that is missing is reported ABSENT, instead of being skipped at
   `k8s_provider.py:189`.
 - **Settings it reads:** `kubeconfig`, `depth`, `max_entries`, and `max_seconds`.
+
+Settings keys, in the settings classes `GAL-settings` adds to each provider module. `GAL-settings` rejects
+unknown keys at config load (plan 2.2), so each key this feature reads is declared:
+
+- `DotEnvSettings` gains `names`, `depth`, `max_entries`, and `max_seconds`;
+- `KubernetesSettings` gains `kubeconfig`, `depth`, `max_entries`, and `max_seconds`;
+- `HiddenGems.__init__` checks them through `GemProvider.check_settings` of `GAL-settings`. A bound out of range
+  raises `ValueError` with `PATTERN_BOUND_MESSAGE`.
 
 ## Abstraction-extension gate
 
@@ -296,18 +343,33 @@ baseline is commit `4438234`.
 - **Implementation owner:** `AbstractGemProvider`, the default; overrides in `DotEnvProvider` and
   `KubernetesProvider`.
 - **Actual caller:** `GemProvider.expand`.
-- **Acceptance tests:** `test_default_expand_returns_a_copy`, `test_expansion_reads_no_values`, and the
-  pattern cases.
+- **Acceptance tests:** `test_default_expand_returns_a_copy`, `test_expansion_reads_no_values`,
+  `test_twenty_kubeconfigs_from_one_pattern`, `test_dotenv_pattern_filters_names`,
+  `test_plain_directory_path_is_rejected`, and `test_pattern_with_backup_is_rejected`.
 
 #### `GemProvider.expand`
 
 - **Signature:** as listed under `src/hiddengems/gem_provider.py` above.
 - **Status:** MUST ADD.
-- **Behavior:** dispatch by provider name, the same lookup `GemProvider.create` uses; `ValueError` for an
-  unregistered name.
+- **Behavior:** dispatch by provider name, the same lookup `GemProvider.create` uses; `ValueError` with
+  `UNKNOWN_PROVIDER_TYPE_MESSAGE` for an unregistered name.
 - **Implementation owner:** `GemProvider` in `gem_provider.py`.
 - **Actual caller:** `HiddenGems.__init__`, in the target translation step of `GAL-targets`.
 - **Acceptance tests:** `test_factory_expand_dispatches_by_provider_name`.
+
+#### `HiddenGems.__init__` target expansion
+
+- **Signature:** unchanged.
+- **Status:** behavior change.
+- **Behavior:** the naming, pseudo-instance, not-local, ABSENT, and merging rules listed under
+  `src/hiddengems/hidden_gems.py` above.
+- **Implementation owner:** `hidden_gems.py`, plus `_matches_names`, `_scan`, and `_inspect_candidate` in
+  `dotenv_provider.py`, and `_directory_kubeconfigs` and `_paths` in `k8s_provider.py`.
+- **Actual caller:** the caller of the library.
+- **Acceptance tests:** `test_twenty_kubeconfigs_from_one_pattern`, `test_missing_root_and_empty_match_are_absent`,
+  `test_declared_missing_file_is_absent`, `test_pattern_budget_marks_incomplete`,
+  `test_online_only_file_is_never_opened`, `test_expanded_and_discovered_file_merge`, and
+  `test_dotenv_pattern_filters_names`.
 
 #### `pattern_walk.py`
 
@@ -318,7 +380,13 @@ baseline is commit `4438234`.
 - **Implementation owner:** `pattern_walk.py`.
 - **Actual caller:** `DotEnvProvider.expand`, `KubernetesProvider.expand`, and, for the guard,
   `DotEnvProvider._scan`.
-- **Acceptance tests:** the pattern, guard, and bound cases.
+- **Acceptance tests:**
+  - grammar: `test_single_star_is_one_level`, `test_double_star_is_the_tree_within_depth`,
+    `test_star_matches_dot_names`, and `test_missing_root_and_empty_match_are_absent`;
+  - guard: `test_tree_pattern_at_home_is_rejected`, `test_single_level_pattern_at_home_is_allowed`,
+    `test_cloud_sync_folder_is_skipped_and_reported`, `test_network_mount_under_home_is_not_crossed`,
+    `test_pattern_rooted_inside_cloud_folder_is_allowed`, and `test_online_only_file_is_never_opened`;
+  - bounds: `test_pattern_never_follows_symlinks_or_mounts` and `test_pattern_budget_marks_incomplete`.
 
 #### `Presence`, `DotEnvWalkOutcome`, `KubeWalkOutcome`, and `KubeFileIssue`
 
@@ -326,25 +394,41 @@ baseline is commit `4438234`.
 - **Status:** MUST ADD.
 - **Behavior:** values only. Each walk-outcome value equals today's message, so existing text is unchanged.
 - **Implementation owner:** `abstraction.py`, `dotenv_constants.py`, and `kubernetes_constants.py`.
-- **Actual caller:** `DotEnvProvider._scan` and `_inspect_candidate`; `KubernetesProvider._directory_kubeconfigs`
-  and `_paths`; `HiddenGems.__init__`, which lists ABSENT targets.
+- **Actual caller:** `DotEnvProvider._scan`, `_inspect_candidate`, and `__init__`, which sets `walk_outcome` and
+  `presence`; `KubernetesProvider._directory_kubeconfigs`, `_paths`, and `__init__`, which sets `walk_outcome`;
+  `HiddenGems.__init__`, which lists ABSENT targets.
 - **Acceptance tests:** `test_dotenv_walk_outcomes_keep_todays_messages`,
   `test_kube_walk_outcomes_keep_todays_messages`, `test_missing_root_and_empty_match_are_absent`, and
   `test_declared_missing_file_is_absent`.
 
+#### Settings keys
+
+- **Signature:** `DotEnvSettings` gains `names`, `depth`, `max_entries`, and `max_seconds`;
+  `KubernetesSettings` gains `kubeconfig`, `depth`, `max_entries`, and `max_seconds`.
+- **Status:** MUST ADD; `GAL-settings` rejects unknown keys at config load (plan 2.2).
+- **Behavior:** the ranges under [Bounds of a pattern walk](#bounds-of-a-pattern-walk). A bound out of range
+  raises `ValueError` with `PATTERN_BOUND_MESSAGE` at config load.
+- **Implementation owner:** the settings classes of `GAL-settings` in `dotenv_provider.py` and `k8s_provider.py`.
+- **Actual caller:** `HiddenGems.__init__`, through `GemProvider.check_settings` of `GAL-settings`.
+- **Acceptance tests:** `test_out_of_range_bound_is_rejected`, and the pattern cases that read each key:
+  `test_dotenv_pattern_filters_names`, `test_double_star_is_the_tree_within_depth`,
+  `test_pattern_budget_marks_incomplete`, and `test_twenty_kubeconfigs_from_one_pattern`.
+
 ### 2. What each extension extends
 
 `expand` extends `AbstractGemProvider` with a default; no member of `B` changes. `GemProvider.expand` extends
-the existing factory, and no other code calls a provider class's `expand`.
+the existing factory, and no other code calls a provider class's `expand`. The target expansion changes the
+behavior of `HiddenGems.__init__`, not its signature. The settings keys extend the settings classes of
+`GAL-settings`.
 
 ### 3. Providers in P
 
-| Provider | `expand` | What it expands |
-| --- | --- | --- |
-| `OnePasswordProvider` | inherited default | nothing: accounts are declared one per target |
-| `DotEnvProvider` | override | a pattern `path` into files, filtered by `names` |
-| `KeyringProvider` | inherited default | nothing: one instance per user |
-| `KubernetesProvider` | override | a pattern `kubeconfig` into files |
+| Provider | `expand` | What it expands | Applicable contract |
+| --- | --- | --- | --- |
+| `OnePasswordProvider` | default | nothing: one target per account | `AbstractGemProvider` with this feature's Δ |
+| `DotEnvProvider` | override | a pattern `path`, filtered by `names` | `AbstractGemProvider` with this feature's Δ |
+| `KeyringProvider` | default | nothing: one instance per user | `AbstractGemProvider` with this feature's Δ |
+| `KubernetesProvider` | override | a pattern `kubeconfig` into files | `AbstractGemProvider` with this feature's Δ |
 
 ### 4. Baseline tests whose expectations change
 
@@ -354,10 +438,19 @@ None. The baseline tests that touch the changed walkers keep their expectations:
   The record still carries the outcome's string value, which equals that text.
 - `tests/test_hidden_gems_routing.py:155-158` unpacks `KubernetesProvider._paths(...)` as `paths, warnings` and
   asserts `warnings == ()`. The shape is kept, and no warning occurs there.
-- `tests/test_hidden_gems_routing.py:281,294,300` test the truthiness of `scan_issue`. `COMPLETE` is never stored
-  in `scan_issue`, because only an incomplete walk creates a pseudo-instance.
-- `tests/test_hidden_gems_dotenv.py:96-97` passes `object()` as `scan_issue` and expects `TypeError`. That check
-  is unchanged.
+- `tests/test_hidden_gems_routing.py:281,294,300` test the truthiness of the record setting `scan_issue`. That
+  setting stays a string, present only on pseudo-instances; `walk_outcome` replaces `None` only on the provider
+  instance. `COMPLETE` is never stored in `scan_issue`, because only an incomplete walk creates a pseudo-instance.
+- `tests/test_hidden_gems_dotenv.py:96-97` passes `object()` as `scan_issue` and expects `TypeError`. The
+  constructors keep validating the `scan_issue` and `access_issue` settings exactly as today
+  (`dotenv_provider.py:243-248`), so that check is unchanged.
+- `tests/test_hidden_gems_dotenv.py:494` compares the record setting `access_issue` with
+  `"Dotenv file is not readable"`. The setting keeps that text for an `UNREADABLE` file; only the
+  `_DotEnvPathRecord` field and the provider attribute become `presence`.
+- `tests/test_hidden_gems_dotenv.py:470` patches `DotEnvProvider._MAX_SCAN_ENTRIES`, and
+  `tests/test_hidden_gems_routing.py:278,296,297` patch `KubernetesProvider._MAX_AUTO_CONFIG_BYTES` and
+  `_MAX_DIRECTORY_ENTRIES`. They keep working, because `GAL-settings` keeps the class attributes as the read
+  path, initialized from the module constants.
 
 The five tests listed under [Behavior and compatibility](#behavior-and-compatibility) pass unchanged.
 
@@ -370,40 +463,59 @@ The baseline stays commit `4438234`. This proposal does not redefine `B`.
 No new class. Every refusal reuses `ValueError`, which already means "this argument's value is not acceptable"
 in the baseline (`gem_provider.py:38`, and the dotenv settings checks):
 
-- a declared plain path that names a directory, with the suggestion `<dir>/*`;
-- a tree pattern rooted at the home directory, a filesystem root, or a drive root;
-- `depth`, `max_entries`, or `max_seconds` out of range, naming the key;
-- a dotenv pattern together with `backup_filename`;
-- an unregistered provider name in `GemProvider.expand`, with the message of `GemProvider.create`.
+- a declared plain path that names a directory, with `PLAIN_PATH_IS_DIRECTORY_MESSAGE` and its suggestion
+  `<dir>/*`;
+- a tree pattern rooted at the home directory, a filesystem root, or a drive root, with
+  `TREE_PATTERN_ROOT_MESSAGE`;
+- `depth`, `max_entries`, or `max_seconds` out of range, with `PATTERN_BOUND_MESSAGE`, naming the key;
+- a dotenv pattern together with `backup_filename`, with `PATTERN_BACKUP_MESSAGE`;
+- an unregistered provider name in `GemProvider.expand`, with `UNKNOWN_PROVIDER_TYPE_MESSAGE`, the message of
+  `GemProvider.create`.
 
 An unreadable directory, a skipped cloud folder, or a budget limit is not an exception: it is a
 `PatternWalkOutcome` on a pseudo-instance, so the lookup ends in `IncompleteGemLookupError` as today. An
-online-only file is `Presence.NOT_LOCAL`, whose lookups are UNKNOWN. `test_exception_classes_match_the_register`
-of `GAL-plugin` therefore needs no new entry for this feature.
+online-only file is `Presence.NOT_LOCAL`: its `find_gem` raises the existing `ProviderLookupError` with
+`NOT_LOCAL_NEXT_ACTION`, so its lookups are UNKNOWN. `test_exception_classes_match_the_register` of `GAL-plugin`
+therefore needs no new entry for this feature.
 
 ## Constants and enums
 
 - In `src/hiddengems/constants/config.py`:
   - `UNBOUNDED_DEPTH: Final[float] = math.inf` and `UNBOUNDED_DEPTH_WORD: Final[str] = "unbounded"`.
-  - `PATTERN_MAX_ENTRIES: Final[int] = 1024` and `PATTERN_MAX_SECONDS: Final[float] = 0.25`: the same budget as
-    today's dotenv discovery. A declared pattern is larger than automatic `~/.kube` discovery, so it does not
-    reuse that walk's 64-entry limit.
+  - `PATTERN_MAX_ENTRIES: Final[int] = MAX_SCAN_ENTRIES` and
+    `PATTERN_MAX_SECONDS: Final[float] = MAX_SCAN_SECONDS`: derived from today's dotenv discovery budget, not
+    repeated literals. A declared pattern is larger than automatic `~/.kube` discovery, so it does not reuse that
+    walk's 64-entry limit.
   - `CLOUD_SYNC_DIRECTORIES: Final[tuple[str, ...]]`, holding `"Library/CloudStorage"`,
     `"Library/Mobile Documents"`, `"Dropbox"`, `"OneDrive"`, `"Google Drive"`, `"Box"`, and `"iCloudDrive"`,
     relative to the home directory. These are the clients' default folders. A client configured to use another
     folder is not guarded; the user can still declare a pattern rooted inside it.
+  - `NOT_LOCAL_NEXT_ACTION: Final[str] = "Make the file available offline, then re-run"`.
+  - `TARGET_NAME_SEPARATOR: Final[str] = "/"`.
+  - `EXPANDED_EVIDENCE_DESCRIPTION: Final[str] = "Found by expanding declared target {target}"`.
+  - The record setting keys: `PRESENCE_ISSUE_SETTING: Final[str] = "presence_issue"`,
+    `SCAN_ISSUE_SETTING: Final[str] = "scan_issue"`, and `SCAN_ROOT_SETTING: Final[str] = "scan_root"`.
+  - The refusal messages, each `Final[str]`:
+    - `UNKNOWN_PROVIDER_TYPE_MESSAGE = "Unknown provider type: {provider!r}"`, a move of the literal
+      `GemProvider.create` raises at `gem_provider.py:82`;
+    - `PLAIN_PATH_IS_DIRECTORY_MESSAGE = "Target {target!r} names a directory; declare {path}/* to expand it"`;
+    - `TREE_PATTERN_ROOT_MESSAGE`, with the value
+      `"Pattern {pattern!r} walks a tree from {root}; start the pattern in a specific directory"`. It names
+      the pattern, because `walk_pattern` receives the pattern and not the target;
+    - `PATTERN_BOUND_MESSAGE = "Setting {key!r} must be between {low} and {high}"`;
+    - `PATTERN_BACKUP_MESSAGE = "Target {target!r} cannot combine a pattern with backup_filename"`.
+- In `src/hiddengems/constants/platform.py`, created by `GAL-sdk-optional` (plan 2.5):
   - `MACOS_SF_DATALESS: Final[int] = 0x40000000`, the macOS `SF_DATALESS` file flag. Python 3.11's `stat` module
     does not define it.
   - `WINDOWS_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: Final[int] = 0x00400000`, the Windows attribute. `stat`
     defines `FILE_ATTRIBUTE_OFFLINE` but not this one.
-  - `NOT_LOCAL_NEXT_ACTION: Final[str] = "Make the file available offline, then re-run"`.
-  - `TARGET_NAME_SEPARATOR: Final[str] = "/"`.
-  - `EXPANDED_EVIDENCE_DESCRIPTION: Final[str] = "Found by expanding declared target {target}"`.
 - In `src/hiddengems/abstraction.py`: `class Presence(StrEnum)` with `PRESENT = "present"`, `ABSENT = "absent"`,
-  and `NOT_LOCAL = "not_local"`. A file that exists but cannot be read stays `PRESENT` with today's
-  `access_issue`, which makes its lookups UNKNOWN.
+  `NOT_LOCAL = "not_local"`, and `UNREADABLE = "unreadable"`. A file that exists but cannot be read is
+  `UNREADABLE`, whose lookups are UNKNOWN.
 - In `src/hiddengems/gems/dotenv_constants.py`:
   - `DEFAULT_DOTENV_NAMES: Final[tuple[str, ...]] = (".env", ".env.*")`;
+  - `DOTENV_NOT_LOCAL_REASON: Final[str] = "Dotenv file is stored online only"`, the reason for an online-only
+    dotenv file;
   - `class DotEnvWalkOutcome(StrEnum)`, with these members:
     - `COMPLETE = "complete"`;
     - `DIRECTORY_UNREADABLE = "Dotenv discovery could not read every directory"`;
@@ -424,7 +536,7 @@ of `GAL-plugin` therefore needs no new entry for this feature.
     - `PATH_UNREADABLE = "Kubeconfig path could not be read"`;
     - `NOT_LOCAL = "Kubeconfig file is stored online only"`.
 - Existing limits used: `MAX_SCAN_ENTRIES`, `MAX_SCAN_SECONDS`, `MAX_DIRECTORY_ENTRIES`, and
-  `MAX_AUTO_CONFIG_BYTES`.
+  `MAX_AUTO_CONFIG_BYTES`, which `GAL-settings` holds.
 
 ## Libraries
 
@@ -443,8 +555,8 @@ None. `fnmatch`, `math`, `stat`, and `enum` are in the standard library.
   cloud folder is no longer found implicitly; the lookup reports the skip, and the user can declare that folder
   with a pattern.
 - **A declared plain path that names a directory now raises `ValueError`** instead of being dropped silently.
-  Behavior change: a configuration that relied on the silent drop now fails at load, and the error names the
-  fix.
+  Behavior change: a configuration that relied on the silent drop now fails at load, and the error,
+  `PLAIN_PATH_IS_DIRECTORY_MESSAGE`, names the fix.
 - **A declared missing file or empty pattern is reported ABSENT** instead of being dropped. Behavior change; a
   strengthening.
 - **`AbstractGemProvider` gains a non-abstract hook.** Contract extension. A third-party provider inherits the
@@ -492,7 +604,7 @@ Cases:
   - Expected: `a`, `b`, and `sub/c` with unbounded depth; `a` and `b` only with depth 0.
 - `test_tree_pattern_at_home_is_rejected`.
   - Input: the home directory patched to `<tmp>/home`; the patterns `~/**/.env` and `/**/kubeconfig`.
-  - Expected: `ValueError` naming the target.
+  - Expected: `ValueError` with `TREE_PATTERN_ROOT_MESSAGE`, naming the pattern.
 - `test_single_level_pattern_at_home_is_allowed`.
   - Input: the patched home holding `.env.local`; the pattern `~/.env*`.
   - Expected: one instance.
@@ -512,7 +624,8 @@ Cases:
   - Expected: `Dropbox/app/.env` is found.
 - `test_online_only_file_is_never_opened`.
   - Input: a matched file for which `is_local` is patched to return false, and `open` patched to fail for it.
-  - Expected: no open; the instance's lookups are UNKNOWN with `NOT_LOCAL_NEXT_ACTION`.
+  - Expected: no open; the instance is `ProviderState.DETECTED`, and its `find_gem` raises `ProviderLookupError`
+    with `NOT_LOCAL_NEXT_ACTION`, so its lookups are UNKNOWN.
 - `test_dotenv_pattern_filters_names`.
   - Input: `work/.env`, `work/x/.env.local`, and `work/x/notes.txt`; the pattern `work/**/*`.
   - Expected: the two dotenv files only.
@@ -529,10 +642,11 @@ Cases:
     raises `IncompleteGemLookupError`.
 - `test_out_of_range_bound_is_rejected`.
   - Input: `max_entries` 0, and `max_entries` above `PATTERN_MAX_ENTRIES`.
-  - Expected: `ValueError` naming the key.
+  - Expected: `ValueError` with `PATTERN_BOUND_MESSAGE`, naming the key.
 - `test_plain_directory_path_is_rejected`.
   - Input: `"kubeconfig": "<tmp>/dir"`, where `dir` is a directory.
-  - Expected: `ValueError` naming the target and suggesting `<tmp>/dir/*`.
+  - Expected: `ValueError` with `PLAIN_PATH_IS_DIRECTORY_MESSAGE`, naming the target and suggesting
+    `<tmp>/dir/*`.
 - `test_missing_root_and_empty_match_are_absent`.
   - Input: a pattern whose root does not exist, and a pattern that matches nothing.
   - Expected: each target appears in `LookupResult.providers` with `ProviderState.ABSENT`; no issue;
@@ -542,7 +656,7 @@ Cases:
   - Expected: listed with `ProviderState.ABSENT`, not dropped.
 - `test_pattern_with_backup_is_rejected`.
   - Input: a dotenv pattern with `backup_filename`.
-  - Expected: `ValueError` naming the target.
+  - Expected: `ValueError` with `PATTERN_BACKUP_MESSAGE`, naming the target.
 - `test_expanded_and_discovered_file_merge`.
   - Input: a file found both by implicit discovery and by a pattern.
   - Expected: one record, with two evidence entries.
@@ -559,7 +673,7 @@ Cases:
 - `test_factory_expand_dispatches_by_provider_name`.
   - Input: `GemProvider.expand("dotenv", {"path": "<tmp>/work/*"})`, and `GemProvider.expand("unknown", {})`.
   - Expected: the same result as `DotEnvProvider.expand` for the first; `ValueError` with
-    `"Unknown provider type: 'unknown'"` for the second.
+    `UNKNOWN_PROVIDER_TYPE_MESSAGE.format(provider="unknown")` for the second.
 - `test_expansion_reads_no_values`.
   - Input: `open` patched to fail for dotenv files while `expand` runs.
   - Expected: `expand` succeeds.
@@ -568,7 +682,11 @@ Cases:
 
 - **Requires:**
   - `GAL-targets`, whose translation step calls `expand()` and supplies the target names;
-  - `GAL-sdk-optional`, for `ProviderState.ABSENT`. It is delivered earlier in the plan.
+  - `GAL-sdk-optional`, for `ProviderState.ABSENT`, delivered earlier in the plan;
+  - `GAL-settings`, which creates `constants/config.py`, `gems/dotenv_constants.py`, and
+    `gems/kubernetes_constants.py`, holds `MAX_SCAN_ENTRIES`, `MAX_SCAN_SECONDS`, `MAX_DIRECTORY_ENTRIES`, and
+    `MAX_AUTO_CONFIG_BYTES`, and provides the settings classes;
+  - `GAL-plugin`, whose `tests/contract/test_provider_contract.py` holds two of its cases.
 - **Required by:** `GAL-kube-contexts`, which splits each expanded kubeconfig file by context. It uses
   `TARGET_NAME_SEPARATOR` in place of its own separator constant, and reads only files `is_local` accepts.
 - **Open questions it answers in part:**
