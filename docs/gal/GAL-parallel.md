@@ -904,8 +904,8 @@ In `tests/test_hidden_gems_routing.py`:
     `CHILD_EXIT_GATE_SECONDS`; `kill` was called exactly once; the exit is still unconfirmed when the call returns,
     and the receiver thread is still blocked, so the return is not taken as a confirmed exit. After the test
     releases the fake, the receiver thread ends, and a second `run_in_child` call calls
-    `multiprocessing.active_children()` before it starts its child. `test_non_cooperative_provider_never_runs_unbounded` is the contrast: a real child gives
-    `TIMEOUT_REASON` and a set `exitcode`.
+    `multiprocessing.active_children()` before it starts its child. `test_non_cooperative_provider_never_runs_unbounded`
+    is the contrast: a real child gives `TIMEOUT_REASON` and a set `exitcode`.
 - `test_child_result_requires_confirmed_exit_before_return`, under non-cooperative option (b) or dotenv option (b).
   - Input: the fake context of the case above, whose `Pipe` gives a real pipe. Before it returns the pipe, the fake
     writes one complete `RESULT` outcome into the sending end. The fake `Process` stays alive after `join` and
