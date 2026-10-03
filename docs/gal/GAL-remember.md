@@ -1,11 +1,16 @@
 # GAL-remember: remembered detection and provider invalidation
 
-Status: proposal, revision 2. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 3. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
 [Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate).
 
-Revision 2 adds the [Exceptions](#exceptions) section required by the overview's
+Revision 3 makes three corrections. The override check resolves `invalidate` through the method resolution
+order, so a parent class cannot shadow the shared lifecycle. Case R5 gives its record a local evidence path,
+without which the default `revalidate` returns `UNKNOWN` and the record is never reused. The exceptions
+section states the inventory entry.
+
+Revision 2 added the [Exceptions](#exceptions) section required by the overview's
 [exception rules](../provider-routing-design.md#exception-consistency). It also corrects how this feature
 relates to `GAL-secure-cache`: that cache sits at the router through its own contract, does not subclass
 `CachingGemProvider`, and shares no storage with remembered detection.
@@ -119,7 +124,9 @@ names are listed under [Acceptance cases](#acceptance-cases).
   - `def _cached(self, key: Hashable, load: Callable[[], T]) -> T`;
   - `def _release(self, key: Hashable, value: object) -> None`, a hook whose default does nothing;
   - `def __init_subclass__(cls, **kwargs: Any) -> None`, which raises `TypeError` with
-    `INVALIDATE_OVERRIDE_MESSAGE` when a subclass defines `invalidate` in its own class body.
+    `INVALIDATE_OVERRIDE_MESSAGE` when `cls.invalidate is not CachingGemProvider.invalidate`. The check
+    follows the method resolution order, so it also catches an `invalidate` that a mixin listed before
+    `CachingGemProvider` supplies, not only one defined in the subclass's own body.
 - **Behavior:**
   - The store belongs to the instance: a `_CacheStore` with the fields `lock: threading.Lock`,
     `entries: dict[Hashable, object]`, and `generation: int`. It is created on first use with
@@ -367,7 +374,9 @@ The baseline stays commit `4438234`. This proposal changes no member of `B` and 
 
 ## Exceptions
 
-One new class, and four reuses, under the overview's exception rules:
+One new class, and four reuses, under the overview's exception rules. This feature's pull request adds
+`("hiddengems.detection_cache", "RememberedStoreWarning", ("UserWarning",))` to `EXPECTED_EXCEPTIONS` in
+`test_exception_classes_match_the_register` of `GAL-plugin`:
 
 - **New: `RememberedStoreWarning(UserWarning)`,** in `detection_cache.py`.
   - Emitted when the remembered entry cannot be saved, or is deliberately not saved: an `OSError` on write, a
@@ -469,7 +478,8 @@ real secret. None has been run, because nothing is implemented.
 - **C4** `test_caching_provider_discards_a_load_that_finishes_after_invalidate`: a `load` that waits on an
   event while `invalidate()` runs returns its value, which is not stored.
 - **C5** `test_caching_provider_rejects_an_invalidate_override`: defining a subclass with its own `invalidate`
-  raises `TypeError` with `INVALIDATE_OVERRIDE_MESSAGE`.
+  raises `TypeError` with `INVALIDATE_OVERRIDE_MESSAGE`. So does `class P(Mixin, CachingGemProvider)` where
+  `Mixin` defines `invalidate`.
 - **C6** `test_caching_provider_release_failures_raise_one_group_after_all_entries`: two of three `_release`
   calls raise; all three run, the store is empty, and one `ExceptionGroup` holds the two errors.
 - **C7** `test_detect_reads_only_declared_environment_names`: for each `p ∈ P` and each of `Darwin`, `Linux`,
@@ -490,8 +500,10 @@ real secret. None has been run, because nothing is implemented.
   with new settings; the first instance is the same object, and the second is new.
 - **R4** `test_invalidate_keeps_caller_records`: with `providers=` given, `records` is unchanged and the hooks
   ran.
-- **R5** `test_remembered_detection_skips_detect_on_next_construction`: a patched `GemProvider.detect` is called
-  once across two constructions; the second's records carry `EvidenceSource.REMEMBERED`.
+- **R5** `test_remembered_detection_skips_detect_on_next_construction`: a patched `GemProvider.detect` returns
+  one record whose evidence is `DetectionEvidence(EvidenceSource.KNOWN_PATH, ..., path)` for a file under
+  `tmp_path`, so the default `revalidate` gives `VALID`. `detect` is called once across two constructions,
+  and the second's records carry `EvidenceSource.REMEMBERED`.
 - **R6** `test_refresh_detects_again_and_replaces_the_entry`.
 - **R7** `test_each_fingerprint_change_marks_the_entry_stale`, parametrized over the members of `StaleReason`,
   each produced by changing one input.
