@@ -323,7 +323,8 @@ Rules for every feature:
    tests, plus the closest existing class, why it does not fit, and the handlers that still catch it.
 
 **Check:** `test_exception_classes_match_the_register`, in `tests/contract/test_provider_contract.py`. It is
-delivered by `GAL-plugin`, the first feature that adds a class. It imports every module under `hiddengems` with
+delivered by `GAL-plugin`, the first feature in the delivery plan, under either `GAL-plugin` option; under option
+two it also adds the first class. It imports every module under `hiddengems` with
 `pkgutil.walk_packages` and collects each class derived from `BaseException` that the package defines, warnings
 included. It compares their module, name, and direct bases with an expected set: `E_B` plus the approved
 additions. An undeclared class, a changed base, or a missing baseline class fails. A feature that adds a class
@@ -354,7 +355,9 @@ are one built-in `ExceptionGroup` (`GAL-remember`); `write_capability` with a no
 (`GAL-plugin`); a uniform read error would be `ProviderLookupError` (proposed `GAL-read-errors`); a legacy writer,
 or a provider that defines both `find_gem_within` and `get_gem_within` without their base class, warns with
 `DeprecationWarning` (`GAL-plugin`, `GAL-parallel`); an `invalidate` override is `TypeError` (`GAL-remember`); a
-timed-out cache wait is `IncompleteGemLookupError` (`GAL-secure-cache`).
+timed-out cache wait is `IncompleteGemLookupError` at `dig_gem` and the built-in `TimeoutError` elsewhere: `hide_gem`
+raises it after its write, `HiddenGems.invalidate` collects it, and the cache's `expire` and `close` raise it
+(`GAL-secure-cache`).
 
 ## Feature index
 
@@ -800,11 +803,14 @@ as `software-design.md` requires. An earlier version of this section put every c
   read path, initialized from the new module constant. Baseline tests that patch the class attribute
   (`tests/test_hidden_gems_dotenv.py:470`, `tests/test_hidden_gems_routing.py:278,296,297`) keep working
   unchanged.
-- Values that can be computed are computed. The 1Password integration version comes from
-  `importlib.metadata.version(BUILTIN_DISTRIBUTION)`, replacing the literal `"v0.1.0"`.
+- Values that can be computed are computed. The 1Password integration version comes from `installed_version()`
+  of `GAL-discovery`, replacing the literal `"v0.1.0"`. `installed_version() -> str` in `gem_provider.py` returns
+  `importlib.metadata.version(BUILTIN_DISTRIBUTION)`, or `PACKAGE_VERSION_UNKNOWN` when that raises
+  `importlib.metadata.PackageNotFoundError`, as in a run from `src/` without an installed distribution.
 - Configuration may lower a limit. Raising one above its constant is rejected.
 
-`src/hiddengems/constants/capability.py`, created with `constants/__init__.py` by `GAL-plugin`; every constant
+`src/hiddengems/constants/capability.py`, created with `constants/__init__.py` by `GAL-plugin`, or by `GAL-parallel`
+under `GAL-plugin` option one, which adds no write constants; every constant
 in it is `Final[str]`:
 
 - `WRITE_SUPPORTED_REASON`, `WRITE_LEGACY_REASON`, `WRITE_UNSUPPORTED_REASON`, `WRITE_CAPABILITY_INPUT_ERROR`,
@@ -837,6 +843,9 @@ in it is `Final[str]`:
   used by `GAL-remember`).
 - `ENTRY_POINT_GROUP: Final[str] = "hiddengems.providers"` and
   `BUILTIN_DISTRIBUTION: Final[str] = "hiddengems"` (`GAL-discovery`).
+- `PACKAGE_VERSION_UNKNOWN: Final[str] = "unknown"`, what `installed_version()` returns when the distribution is
+  not installed, and `BUILTIN_PROVIDER_ENTRY_POINTS: Final[Mapping[str, str]]`, a `MappingProxyType` of the four
+  built-in `name` to `"module:Class"` pairs that `pyproject.toml` declares (`GAL-discovery`).
 - `UNBOUNDED_DEPTH: Final[float] = math.inf` and `UNBOUNDED_DEPTH_WORD: Final[str] = "unbounded"`; the
   setting `"unbounded"` maps to `math.inf`, never to `None` (`GAL-expand`).
 - `TARGET_NAME_SEPARATOR: Final[str] = "/"` and
@@ -847,8 +856,8 @@ in it is `Final[str]`:
   `canonical_json.canonical_json` (`GAL-chooser`).
 - `DISCOVERY_LOCAL_OPTION: Final[str] = "include_local"`: the detection option the router passes to
   providers (`GAL-local-off`).
-- `DETECTION_LIFETIME_SECONDS` moves to `constants/remember.py`, with `PACKAGE_VERSION_UNKNOWN` and the other
-  `GAL-remember` constants listed in [GAL-remember.md](gal/GAL-remember.md#constants).
+- `DETECTION_LIFETIME_SECONDS` moves to `constants/remember.py`, with the other `GAL-remember` constants listed in
+  [GAL-remember.md](gal/GAL-remember.md#constants).
 
 `src/hiddengems/constants/platform.py`:
 
@@ -884,7 +893,8 @@ in it is `Final[str]`:
 - `MAX_KUBE_CONTEXTS: Final[int] = 64`: the same bound as directory entries (`GAL-kube-contexts`).
 - `ALL_CONTEXTS: Final[str] = "*"` (`GAL-kube-contexts`); the separator is `TARGET_NAME_SEPARATOR` of
   `GAL-expand`.
-- `CONTEXT_SETTING`, listed in [GAL-remember.md](gal/GAL-remember.md#constants) (`GAL-remember`).
+- `CONTEXT_SETTING` and `NAMESPACE_SETTING`, listed in [GAL-expand.md](gal/GAL-expand.md#constants-and-enums)
+  (`GAL-expand`; `GAL-remember` also uses `CONTEXT_SETTING`).
 
 `src/hiddengems/gems/dotenv_constants.py` (`GAL-settings` unless noted):
 
@@ -1288,8 +1298,9 @@ Status: locked.
 
 Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 9. `put_gem` moves to `WritableGemProvider`, the
 read-only providers lose their stubs, and `hide_gem` raises `ProviderNotWritableError` before any call to a
-read-only provider. The hooks and shared types of revision 1 moved to the features that call them; that file's
-Scope lists where each one went.
+read-only provider. Under option one, `put_gem` stays, and the feature delivers only the constants package, the
+capability types, and the `tests/contract/` kit. The hooks and shared types of revision 1 moved to the features
+that call them; that file's Scope lists where each one went.
 
 - **Blocked by:** `GAL-plugin-contract`.
 
@@ -1313,7 +1324,7 @@ Scope lists where each one went.
   `_MAX_DIRECTORY_ENTRIES` keep their class attribute as the read path, initialized from the new module
   constant, so the baseline tests that patch them keep working unchanged.
 - **Existing tests changed:** none; the provider constructors keep their current checks.
-- **Blocked by:** nothing.
+- **Blocked by:** `GAL-plugin`, which creates `constants/__init__.py`.
 
 ### GAL-selector
 
@@ -1329,7 +1340,7 @@ Scope lists where each one went.
 - **Rule:** a key that no provider in scope declares raises `InvalidSelectorError` before any lookup. A key that
   some providers declare leaves the others `ProviderNotApplicable`, as today.
 - **Existing tests changed:** none; new tests in `tests/test_hidden_gems_routing.py`.
-- **Blocked by:** nothing.
+- **Blocked by:** `GAL-plugin`, whose `test_exception_classes_match_the_register` gains `InvalidSelectorError`.
 
 ### GAL-discovery
 
@@ -1348,12 +1359,18 @@ Scope lists where each one went.
     `types: Sequence[type] | None = None`. `None` means `GemProvider.provider_types`.
 - **Moves:**
   - The literal tuple in `GemProvider.provider_types` becomes `load_provider_types()` of the built-ins, run at
-    import.
+    import. When `entry_points(group=ENTRY_POINT_GROUP)` holds no entry from `BUILTIN_DISTRIBUTION`, as when the
+    package is imported from `src/` without an installed distribution, `load_provider_types()` loads the
+    built-ins from `BUILTIN_PROVIDER_ENTRY_POINTS`, so a run from `src/` registers the same four providers. A
+    test asserts that `BUILTIN_PROVIDER_ENTRY_POINTS` equals the entry points in `pyproject.toml`.
+  - `installed_version()` is new here; the 1Password integration version uses it.
   - The `import_module` workaround for `OnePasswordProvider` is removed.
 - **Router:** `HiddenGems.__init__` adds the allowlisted third-party types from `plugins.allow` once
-  `GAL-targets` exists. Until then only built-ins load. `HiddenGems.__init__` passes the same `types` to every
-  factory method that finds a class by name, including `expand` (`GAL-expand`), `revalidate` and
-  `detection_environment` (`GAL-remember`).
+  `GAL-targets` exists. Until then only built-ins load. When the configuration allowlists third-party types,
+  `HiddenGems.__init__` passes the same `types` to every factory method that finds a class by name, including
+  `expand` (`GAL-expand`), `revalidate` and `detection_environment` (`GAL-remember`). Otherwise it passes no
+  `types` and calls each factory method exactly as today, so the baseline tests that replace
+  `GemProvider.create` with a two-argument stub keep working unchanged.
 - **`pyproject.toml`:** `[project.entry-points."hiddengems.providers"]` with
   `dotenv = "hiddengems.gems.dotenv_provider:DotEnvProvider"`,
   `kubernetes = "hiddengems.gems.k8s_provider:KubernetesProvider"`,
@@ -1385,7 +1402,8 @@ Scope lists where each one went.
 - **Existing tests changed:** `test_detect_records_native_library_without_reading_a_gem`, because the platform
   check moved; and `test_wheel_contains_provider_package_and_declared_dependencies`, for the extra marker if
   `GAL-kube-extra` is approved.
-- **Blocked by:** the packaging part by `GAL-kube-extra`.
+- **Blocked by:** `GAL-plugin`, which creates `constants/__init__.py`; the packaging part also by
+  `GAL-kube-extra`.
 
 ### GAL-targets
 
@@ -1412,7 +1430,8 @@ Scope lists where each one went.
   - Each target becomes detection options for its provider. A target and a discovered instance with the same
     canonical `instance_id` merge into one record, keeping both evidence entries.
 - **Existing tests changed:** none; the routing tests keep pointing `config_path` at a missing file.
-- **Blocked by:** nothing. `GAL-config-env` would only add an override later.
+- **Blocked by:** `GAL-settings`, which creates `constants/config.py`, and `GAL-plugin`, whose exception check
+  gains `ConfigError`. `GAL-config-env` would only add an override later.
 
 ### GAL-expand
 
@@ -1503,7 +1522,8 @@ is reported ABSENT, and walk outcomes become enums.
     `CANDIDATE_KEY_SEPARATOR`, then `canonical_json(reference.location)`.
   - The property `LookupResult.candidates -> dict[str, GemReference]`.
   - `resolve_gem` and `dig_gem` gain `choice: str | None = None`, a key of `candidates` that reads exactly that
-    location, and `remember: bool = False`, which saves the choice through `save_preference`.
+    location, and `remember: bool = False`, which saves the choice through `save_preference` and then sets
+    `HiddenGems.preferences[name]` to it, so later calls in the same object use it.
   - `StaleGemPreferenceError.__init__(self, name: str, result: LookupResult | None = None)`, so it carries the
     result like the other two errors.
   - `save_preference(path: Path, name: str, preference: Mapping[str, Any]) -> None` in `config.py`. It writes
@@ -1522,7 +1542,8 @@ is reported ABSENT, and walk outcomes become enums.
   - `ScopeRule(StrEnum)` with `TARGET`, `PROVIDER`, `PREFERENCE`, `ROUTE`, and `ALL`.
   - Frozen dataclass `RoutingExplanation(name: str, rule: ScopeRule, targets: tuple[str, ...],
     selector: Mapping[str, Any], providers: tuple[ProviderObservation, ...],
-    capabilities: tuple[CapabilityObservation, ...])`.
+    capabilities: tuple[CapabilityObservation, ...])`. Under `GAL-plugin` option one, no capability function
+    exists before `deadline_capability` of `GAL-parallel`, so `capabilities` is empty until it lands.
   - `HiddenGems.explain(self, name: str) -> RoutingExplanation`. It calls no `find_gem` and reads no value.
 - **Blocked by:** `GAL-scope` and `GAL-plugin`.
 
@@ -1564,7 +1585,7 @@ slow but steady Kubernetes response and a declared dotenv file on an unresponsiv
   - `__main__.py` holds only `if __name__ == "__main__": raise SystemExit(main())`.
 - **Help:** each subcommand's help shows Summary, Description, Examples, Options, Output modes, and Usage, as
   `documentation.md` requires.
-- **Blocked by:** nothing.
+- **Blocked by:** `GAL-plugin`, which creates `constants/__init__.py`.
 
 ### GAL-cli-targets
 
@@ -1633,8 +1654,8 @@ resolved values encrypted for a fixed period, so repeated `dig_gem` calls for an
 `find_gem` or `get_gem` call. `dig_gem(refresh=True)`, `hide_gem`, and `HiddenGems.invalidate()` end a cached
 choice. The cache is a separate contract; `AbstractGemProvider`, the factory, and the providers are unchanged.
 
-- **Blocked by:** `GAL-plugin`, `GAL-parallel`, `GAL-chooser`, `GAL-remember`, `GAL-masked-value`, and decision
-  `GAL-secure-cache`.
+- **Blocked by:** `GAL-plugin`, `GAL-settings`, `GAL-parallel`, `GAL-chooser`, `GAL-remember`, `GAL-masked-value`,
+  and decision `GAL-secure-cache`.
 
 ### New providers
 
