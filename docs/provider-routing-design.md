@@ -191,7 +191,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-write-target` | `hide_gem(target=...)` writes through one named target | [Writes](#46-writes) |
 | `GAL-chooser` | Caller picks from a `candidates` dict; `remember=True` saves it | [Router](#45-router-and-resolution) |
 | `GAL-explain` | `explain(name)` reports a routing decision without reading values | [Router](#45-router-and-resolution) |
-| `GAL-parallel` | Concurrent lookup with per-target timeout and ordered merge | [Router](#45-router-and-resolution) |
+| `GAL-parallel` | Parallel lookup; every provider call stops at the deadline | [GAL-parallel.md](gal/GAL-parallel.md) |
 | `GAL-cli-detect` | `detect` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-targets` | `targets` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-explain` | `explain` command | [Additional pieces](#7-additional-pieces) |
@@ -1221,20 +1221,13 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-- **Files:** `~ hidden_gems.py`, `~ k8s_provider.py`, `~ onepassword_provider.py`.
-- **Change:**
-  - `inspect_gem` submits each in-scope `find_gem` to
-    `concurrent.futures.ThreadPoolExecutor(max_workers=LOOKUP_WORKERS)` and waits with
-    `future.result(timeout=LOOKUP_TIMEOUT_SECONDS)`.
-  - A timeout becomes a `LookupIssue` with `TIMEOUT_REASON` and `TIMEOUT_NEXT_ACTION`.
-  - Results merge in record order, not completion order.
-  - The executor shuts down with `cancel_futures=True`.
-- **Bounded threads:** each provider call carries its own time limit, so a timed-out thread also ends.
-  `KubernetesProvider.find_gem` and `get_gem` pass `_request_timeout=LOOKUP_TIMEOUT_SECONDS` to
-  `read_namespaced_secret`, and `OnePasswordProvider._run_cli` uses `CLI_TIMEOUT_SECONDS`.
-- **Existing tests changed:** none; new tests `test_lookup_time_limit_becomes_an_issue` and
-  `test_results_merge_in_record_order` in `tests/test_hidden_gems_routing.py`.
-- **Blocked by:** nothing.
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 1. It replaces the earlier entry here, which
+bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
+`cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline`,
+a timeout becomes a `LookupIssue`, matches merge in record order, and shutdown waits only for calls that are
+themselves bounded.
+
+- **Blocked by:** `GAL-plugin` and `GAL-settings`.
 
 ### GAL-cli-detect
 
