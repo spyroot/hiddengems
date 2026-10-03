@@ -1,8 +1,13 @@
 # GAL-plugin: provider contract and writable capability
 
-Status: proposal, revision 9. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 10. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
 writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 10 answers review finding GP17. `WRITE_CAPABILITY_INPUT_ERROR` names only the input's type, never its
+value, as the overview's exception rule 4 requires: a token passed by mistake, or an object whose `repr` holds
+one, no longer reaches the `TypeError`. `test_write_capability_rejects_a_non_class_input` checks both cases. No new
+class or gate.
 
 Revision 9 states that under option one this feature does not dissolve: it still delivers the constants package,
 the capability types, and the `tests/contract/` kit that later features build on. It also lists every new
@@ -285,8 +290,10 @@ feature that then has a constant for it.
 - **New: `write_capability(provider_type: type) -> CapabilityObservation`.** Never returns
   `None`. Its source is always `EvidenceSource.PROVIDER_CLASS`, because it reads only the class. The rules
   apply in this order:
-  1. an input that is not a class raises `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`. Every class is
-     classified by the rules below, whether or not it subclasses `AbstractGemProvider`;
+  1. an input that is not a class raises
+     `TypeError(WRITE_CAPABILITY_INPUT_ERROR.format(type_name=type(provider_type).__name__))`. The message names
+     the input's type and never its value or `repr`, so no secret passed by mistake reaches the exception. Every
+     class is classified by the rules below, whether or not it subclasses `AbstractGemProvider`;
   2. a subclass of `WritableGemProvider` gives `SUPPORTED`, with `WRITE_SUPPORTED_REASON`;
   3. a class on which `inspect.getattr_static(provider_type, "put_gem", _MISSING)` finds a callable gives
      `UNKNOWN`, with `WRITE_LEGACY_REASON`. The lookup follows the method resolution order, so a `put_gem`
@@ -344,7 +351,7 @@ feature that then has a constant for it.
   - `WRITE_SUPPORTED_REASON = "Subclasses WritableGemProvider"`;
   - `WRITE_LEGACY_REASON = "Resolves put_gem without subclassing WritableGemProvider"`;
   - `WRITE_UNSUPPORTED_REASON = "Does not subclass WritableGemProvider and resolves no put_gem"`;
-  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs a class, not {value!r}"`;
+  - `WRITE_CAPABILITY_INPUT_ERROR = "write_capability needs a class, not an instance of {type_name}"`;
   - `LEGACY_WRITER_WARNING = "{provider_class} defines put_gem without subclassing WritableGemProvider; subclass
     WritableGemProvider to keep writing"`, legacy writer path only;
   - `PROVIDER_NOT_WRITABLE_MESSAGE = "Provider {provider!r} instance {instance_id!r} cannot store gems"`.
@@ -683,10 +690,12 @@ Cases:
   - Expected without it: `ProviderNotWritableError` with state `UNKNOWN`; `put_gem` never called.
 - `test_exception_classes_match_the_register`, as specified under [Exceptions](#exceptions).
 - `test_write_capability_rejects_a_non_class_input`.
-  - Input: the string `"dotenv"`, the instance `object()`, and then two classes: `object`, and a class with a
-    `put_gem` that does not subclass `AbstractGemProvider`.
-  - Expected: the string and the instance raise `TypeError` with `WRITE_CAPABILITY_INPUT_ERROR`. `object` is
-    `UNSUPPORTED`, and the class with `put_gem` is `UNKNOWN`; neither raises.
+  - Input: the string `"dotenv"`, the instance `object()`, a fake token `secrets.token_hex()` made at run time, an
+    instance of a test class whose `__repr__` and `__str__` return that token, and then two classes: `object`, and
+    a class with a `put_gem` that does not subclass `AbstractGemProvider`.
+  - Expected: each non-class input raises `TypeError` whose message is `WRITE_CAPABILITY_INPUT_ERROR` formatted
+    with that input's type name. The token appears in none of `str(error)`, `repr(error)`, and the items of
+    `error.args`. `object` is `UNSUPPORTED`, and the class with `put_gem` is `UNKNOWN`; neither raises.
 - `test_example_providers_follow_the_contract`.
   - Input: `tests/contract/example_providers.py`, with `monkeypatch.setenv("EXAMPLE_GEM", "fake-value")`.
   - Expected:
