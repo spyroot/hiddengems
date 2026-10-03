@@ -1,10 +1,24 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 2. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 3. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
 
-Revision 2 adds three things:
+Revision 3 corrects revision 2, whose claim that no baseline test changes did not hold:
+
+- `deadline_capability` raises `TypeError` only for an input that is not a class. Any class, including the
+  routing suite's `FakeProvider`, which does not subclass `AbstractGemProvider`, is classified.
+- An `UNKNOWN` provider, one that defines `find_gem_within` without the base class, runs in process with a
+  `DeprecationWarning`, mirroring the legacy writer path of `GAL-plugin`. Only an `UNSUPPORTED` provider takes
+  the non-cooperative path.
+- With an unbounded deadline, every built-in makes exactly today's calls. Arguments that exist only for a
+  bound are passed only when the deadline is finite. Two baseline tests fake those calls with exact
+  signatures.
+- Each baseline routing test is traced through the new path under
+  [Baseline tests whose expectations change](#4-baseline-tests-whose-expectations-change).
+- The Kubernetes and SDK limits are stated as facts and acceptance conditions.
+
+Revision 2 added three things:
 
 - the [Abstraction-extension gate](#abstraction-extension-gate) section;
 - the [Exceptions](#exceptions) section required by the overview's
@@ -90,11 +104,18 @@ Out of scope:
   process or a request, ends within that time.
 - **Built-ins:** each implements both methods. Its existing `find_gem` and `get_gem` delegate to them with
   `Deadline.unbounded()`, so direct callers keep today's behavior.
+- **Unbounded means today's calls.** When `deadline.expires_at` is `math.inf`, a built-in makes exactly the
+  calls it makes at `4438234`, with today's arguments. `_request_timeout`, a `deadline=` argument to
+  `_run_cli`, and the `asyncio.wait_for` wrapper are added only for a finite deadline.
 - **New: `deadline_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation`,** with source
   `EvidenceSource.PROVIDER_CLASS`:
+  - an input that is not a class raises `TypeError`;
   - `SUPPORTED` for a subclass of `DeadlineAwareGemProvider`;
-  - `UNKNOWN` for a class that defines `find_gem_within` without that base;
+  - `UNKNOWN` for any other class on which `inspect.getattr_static` finds a callable `find_gem_within`
+    through the method resolution order;
   - `UNSUPPORTED` otherwise.
+- **New constant:** `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without
+  subclassing DeadlineAwareGemProvider; subclass it to keep parallel lookup"`, in `constants/lookup.py`.
 
 `src/hiddengems/hidden_gems.py`:
 
@@ -104,7 +125,10 @@ Out of scope:
      `ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(records)), thread_name_prefix=LOOKUP_THREAD_PREFIX)`.
   3. For each record in record order:
      - a `SUPPORTED` provider gets `find_gem_within(name, criteria=..., deadline=deadline)` submitted;
-     - any other provider is handled per the
+     - an `UNKNOWN` provider gets the same call submitted, in process, after
+       `warnings.warn(LEGACY_DEADLINE_WARNING.format(provider_class=...), DeprecationWarning)`. This is the
+       recommended option of the [unknown provider decision](#alternatives-for-the-owners-decision);
+     - an `UNSUPPORTED` provider is handled per the
        [non-cooperative provider decision](#alternatives-for-the-owners-decision).
   4. Collect the futures in record order, not completion order, each with
      `future.result(timeout=deadline.remaining() + LOOKUP_SHUTDOWN_GRACE_SECONDS)`. `ProviderNotApplicable` and
@@ -121,12 +145,17 @@ Built-in deadline handling:
 - **Kubernetes:** before each namespace request, if `deadline.expired()`, it stops and raises
   `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION, matches)` with the matches so far. Otherwise it calls
   `read_namespaced_secret(..., _request_timeout=deadline.remaining())`. Several namespaces share one deadline;
-  none gets a fresh one. The pull request records how the client applies `_request_timeout`. If it limits each
-  socket read rather than the whole request, the remaining gap is listed as a known limit.
+  none gets a fresh one. Known limit, checked in `kubernetes` 36.0.3: a numeric `_request_timeout` becomes
+  `urllib3.Timeout(total=...)` (`kubernetes/client/rest.py`). urllib3 2.8.0 applies it to the connection and
+  to each socket read, so a server that sends bytes slowly but steadily can overrun the deadline. The
+  deadline check before each namespace request still stops further requests.
 - **1Password CLI:** `subprocess.run(..., timeout=min(CLI_TIMEOUT_SECONDS, deadline.remaining()))`. On timeout,
   `run` kills the `op` process and waits for it, so the process has ended when the call returns.
-- **1Password SDK:** `asyncio.run(asyncio.wait_for(self._find_sdk(...), deadline.remaining()))`. The pull request
-  records whether cancelling stops the SDK's native work. If it does not, the SDK path counts as non-cooperative.
+- **1Password SDK:** `asyncio.run(asyncio.wait_for(self._find_sdk(...), deadline.remaining()))`. The SDK is not
+  installed in the `hiddengems` environment, so whether cancelling stops its native work is not known. Rule:
+  the SDK path is bounded only if `test_onepassword_sdk_work_ends_at_the_deadline`, run with the SDK
+  installed, finds no SDK task or thread alive after the call returns. If it does not pass,
+  `OnePasswordProvider` sends SDK lookups through the non-cooperative path, and the CLI path stays bounded.
 - **Keychain:** per the [Keychain decision](#alternatives-for-the-owners-decision).
 - **dotenv:** reads one local file and checks the deadline before reading. Known limit: a declared file on an
   unresponsive network mount can block inside the operating system. The walk guard of `GAL-expand` keeps
@@ -162,7 +191,8 @@ baseline is commit `4438234`.
 - **Why it is not a parallel contract:** it subclasses `AbstractGemProvider` and adds two methods under new
   names. `find_gem` and `get_gem` stay the MUST members with their signatures unchanged, and a built-in's
   `find_gem` and `get_gem` delegate to the new methods with `Deadline.unbounded()`. A provider that does not
-  subclass it keeps working, through the non-cooperative decision.
+  subclass it keeps working: in process if it defines `find_gem_within`, otherwise through the
+  non-cooperative decision.
 - **Implementation owner:** `abstract_provider.py`; all four built-ins subclass it.
 - **Actual caller:** `HiddenGems.inspect_gem`, step 3, and `HiddenGems.dig_gem`.
 - **Acceptance tests:** `test_builtin_providers_stop_at_the_deadline`,
@@ -175,8 +205,9 @@ baseline is commit `4438234`.
 - **Status:** MUST ADD.
 - **Behavior:** the same rules and order as `write_capability` of `GAL-plugin`, with
   `DeadlineAwareGemProvider` in place of `WritableGemProvider` and `find_gem_within` in place of `put_gem`: a
-  non-provider input raises `TypeError`; the subclass gives `SUPPORTED`; a `find_gem_within` resolved through
-  the method resolution order gives `UNKNOWN`; anything else gives `UNSUPPORTED`. Source:
+  input that is not a class raises `TypeError`; the subclass gives `SUPPORTED`; a `find_gem_within` resolved
+  through the method resolution order, on any other class, gives `UNKNOWN`; anything else gives
+  `UNSUPPORTED`. Source:
   `EvidenceSource.PROVIDER_CLASS`. Never `None`.
 - **Implementation owner:** `abstract_provider.py`.
 - **Actual caller:** `HiddenGems.inspect_gem`, step 3.
@@ -208,8 +239,32 @@ proposal. `B` loses no member and changes no signature. The factory is unchanged
 
 ### 4. Baseline tests whose expectations change
 
-None. `test_unchecked_onepassword_does_not_silently_return_old_keyring` gains a second parameter value with the
-same assertions, and `FakeProvider` gains keyword arguments whose defaults keep every current test unchanged.
+None. Each of the nine baseline routing tests, traced through the new code:
+
+- **Through `HiddenGems` over `FakeProvider`:** `test_unchecked_onepassword_does_not_silently_return_old_keyring`,
+  `test_detection_runs_once_and_list_valued_gem_stays_nested`, and
+  `test_namespace_only_preference_resolves_unique_cluster`. Its `ClusterProvider` subclass overrides only
+  `find_gem`. `FakeProvider` gains `find_gem_within` and `get_gem_within`, which delegate to `self.find_gem`
+  and `self.get_gem`, so `deadline_capability` is `UNKNOWN`. Step 3 then calls it in process with one
+  `DeprecationWarning`. The matches, issues, and values are the same, and the warning does not fail the suite,
+  because `pyproject.toml` sets no `filterwarnings`.
+- **Through `HiddenGems` over real Kubernetes records:**
+  `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`. The provider is `SUPPORTED`, and its
+  records and pseudo-instances are unchanged.
+- **Calling a provider directly, with an unbounded deadline:**
+  - `test_kubernetes_keeps_confirmed_match_when_other_namespace_is_unchecked`: its fake
+    `read_secret(*, name, namespace)` accepts no `_request_timeout`. With an unbounded deadline none is
+    passed;
+  - `test_onepassword_preserves_match_when_another_account_is_unchecked`: its fake `_run_cli(*args)` accepts no
+    keyword. With an unbounded deadline none is passed;
+  - `test_sdk_vault_preference_filters_duplicate_titles`: with an unbounded deadline, `_find_sdk` runs under
+    `asyncio.run` without `wait_for`, as today.
+- **No lookup at all:** `test_kubeconfig_environment_and_default_are_both_candidates` and
+  `test_onepassword_unknown_cli_source_is_explicit` call `_paths`, `_find_cli`, and `detect`, which this
+  feature does not change.
+
+`test_unchecked_onepassword_does_not_silently_return_old_keyring` also gains a second parameter value with the
+same assertions.
 
 ### 5. Baseline
 
@@ -265,7 +320,15 @@ standard library.
 
 ## Alternatives for the owner's decision
 
-A non-cooperative provider, one whose `deadline_capability` is not `SUPPORTED`:
+An `UNKNOWN` provider, one that defines `find_gem_within` without subclassing `DeadlineAwareGemProvider`:
+
+- **(a) Call it in process, with a `DeprecationWarning` (recommended).** It declares the method, so it is
+  trusted to honor the deadline, exactly as `GAL-plugin`'s legacy writer path trusts a `put_gem`. The baseline
+  routing fakes keep working unchanged in their assertions.
+- **(b) Treat it as non-cooperative.** Then `FakeProvider` must subclass `DeadlineAwareGemProvider`, which
+  also requires it to implement `detect` and, under `GAL-plugin` option one, `put_gem`.
+
+A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
 
 - **(a) Refuse it in parallel lookup.** It is never called. Its lookups become a `LookupIssue` with
   `NO_DEADLINE_REASON` and `NO_DEADLINE_NEXT_ACTION`. Simple and bounded, but a provider registered by replacing
@@ -293,10 +356,14 @@ Each case extends an existing suite; there is no new test framework. Every timin
 
 In `tests/test_hidden_gems_routing.py`:
 
-- **`FakeProvider` gains two keyword arguments,** whose defaults keep every current test unchanged:
+- **`FakeProvider` gains one keyword argument and two methods,** keeping every current test unchanged:
   - `delay: float = 0.0`;
-  - `cooperative: bool = True`. A cooperative fake implements `find_gem_within`, sleeps in small steps, and
-    raises `ProviderLookupError(TIMEOUT_REASON, ...)` when its deadline expires.
+  - `find_gem_within(self, name, *, criteria=None, deadline)`: waits `delay` in steps of
+    `LOOKUP_SHUTDOWN_GRACE_SECONDS / 10`, raising `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION)`
+    when the deadline expires, then returns `self.find_gem(name, criteria=criteria)`;
+  - `get_gem_within(self, reference, *, deadline)`: returns `self.get_gem(reference)`.
+
+  A provider that ignores deadlines is `BlockingExampleProvider`, below, not a flag on `FakeProvider`.
 
   It records when each call starts and ends, and the number of calls active at once.
 - **`test_unchecked_onepassword_does_not_silently_return_old_keyring` is parametrized** by how 1Password goes
@@ -334,6 +401,9 @@ In `tests/contract/test_provider_contract.py`:
     base.
   - Expected: `SUPPORTED`, `UNSUPPORTED`, and `UNKNOWN` respectively, each with source `PROVIDER_CLASS`, never
     `None`.
+- `test_onepassword_sdk_work_ends_at_the_deadline`, skipped when the SDK is not installed.
+  - Input: the real SDK client patched to a coroutine that awaits a native call which never returns.
+  - Expected: the call ends within the bound, and no SDK task or thread is alive afterwards.
 - `test_builtin_providers_stop_at_the_deadline`. Each built-in uses a fake of the I/O it performs, and the test
   measures when the work ends, not whether a timeout argument was passed:
   - **Kubernetes:** a fake API whose `read_namespaced_secret` sleeps for the `_request_timeout` it receives, over
