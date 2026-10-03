@@ -48,7 +48,7 @@ scan the whole filesystem and every account. Detection therefore stays bounded:
 - a scan runs once and is cached (`GAL-remember`), so `A(o)` grows across runs without rescanning. The cache
   is invalidated when the caller explicitly asks through the API, for example `refresh=True`, or when an
   invalidation rule from `docs/README.md` fires. Each provider therefore needs an invalidation hook in its
-  interface; that is a change to the provider contract and is proposed together with its revision;
+  interface. That hook, `invalidate()`, is declared in [GAL-remember.md](gal/GAL-remember.md);
 - whatever stays outside the scope is `Undetected`. Only the user can bring it into `A(o)`, by declaring the
   provider and its location.
 
@@ -167,6 +167,115 @@ Additional cases:
 | `GAL-case-partial-preference` | `Pref(x)` names only a namespace | Preferred, or Tie in preference |
 | `GAL-case-stale-preference` | `Pref(x)` points at `c₂`; `R(x) = {c₁}` | Stale; no fallback |
 
+## Abstraction-extension gate
+
+B := existing abstraction contract at the approved baseline revision.
+Δ := explicitly approved contract changes.
+P := registered concrete provider classes.
+C := B with only Δ applied.
+
+MUST extend the existing AbstractGemProvider or an explicitly approved subclass;
+MUST NOT introduce a parallel replacement contract or bypass the existing factory.
+
+Every extension MUST declare its signature, behavior, implementation owner,
+actual caller, and acceptance tests BEFORE implementation.
+
+PASS only when the resulting abstraction matches C and every p ∈ P satisfies
+its applicable contract. Preserve baseline tests except for explicitly approved
+changes to their expectations.
+
+The proposed change MUST NOT redefine its own baseline to make the gate pass.
+
+## Gate baseline and register
+
+The owner's gate above is quoted exactly. It binds every feature in the [Feature index](#feature-index). This
+section fixes what its symbols denote. The owner approves the baseline revision in this document's pull
+request, and no feature proposal changes it.
+
+### Baseline
+
+- **Baseline revision:** commit `4438234`, today's `main`.
+- **`B`:** `AbstractGemProvider` in `src/hiddengems/abstract_provider.py`, blob `a0f74364`, with these members:
+  - `name: ClassVar[str]`;
+  - abstract `__init__(self, **settings: Any) -> None`;
+  - abstract classmethod `detect(cls, **options: Any) -> Tuple[DetectedProvider, ...]`;
+  - abstract `find_gem(self, name: str, *, criteria: Mapping[str, Any] | None = None) ->
+    tuple[GemReference, ...]`;
+  - abstract `get_gem(self, reference: GemReference) -> List[Gem]`;
+  - abstract `put_gem(self, name: str, value: Gem, *, criteria: Mapping[str, Any] | None = None,
+    dry_run: bool = False) -> GemReference`.
+
+  `B` also holds the obligations its docstrings state: detection and lookup return only non-secret metadata,
+  and `put_gem` never prints the value or puts it in the reference. The types its members name are those of
+  `src/hiddengems/abstraction.py`, blob `f99ec57c`.
+- **Not `B`:** `src/hiddengems/abstract_provier.py`, blob `5e152963`, defines a second, older
+  `AbstractGemProvider` that nothing imports at `4438234`. No feature adopts it as a baseline. Its removal is
+  the owner's decision listed in [GAL-plugin.md](gal/GAL-plugin.md).
+- **The existing factory:** `GemProvider` in `src/hiddengems/gem_provider.py`, blob `ec811213`, with
+  `provider_types`, `detect(cls, **options: Any) -> Tuple[DetectedProvider, ...]`, and
+  `create(cls, record: DetectedProvider, **overrides: Any) -> AbstractGemProvider`. `HiddenGems.__init__`
+  detects only through `GemProvider.detect` (`hidden_gems.py:130`) and creates every instance through
+  `GemProvider.create` (`hidden_gems.py:146`). A feature bypasses the factory when it detects, creates, or
+  dispatches to a provider class by any other path, including a branch on a provider's name.
+- **`P` at the baseline,** in `provider_types` order: `OnePasswordProvider`, `DotEnvProvider`,
+  `KeyringProvider`, and `KubernetesProvider`. `P` grows only through the factory. `FakeProvider` in
+  `tests/test_hidden_gems_routing.py` is a test double injected by patching `GemProvider.create`; it is not in
+  `P`.
+- **Baseline tests:** the 44 test functions at `4438234`: 28 in `tests/test_hidden_gems_dotenv.py`, 5 in
+  `tests/test_hidden_gems_keyring.py`, 2 in `tests/test_hidden_gems_package.py`, and 9 in
+  `tests/test_hidden_gems_routing.py`.
+
+### How the gate is judged
+
+- **Matching `C`:** for each member of `AbstractGemProvider` and of each approved subclass, the gate compares
+  the name; the kind (class attribute, method, or classmethod); whether it is abstract; the parameter names,
+  kinds, and defaults; and the return annotation. Annotations compare as types, so `Tuple[...]` equals
+  `tuple[...]` and `List[...]` equals `list[...]`. The import-style rewrite of `GAL-lint-clean` therefore
+  leaves `B` unchanged. Docstring wording is not compared; the obligations the docstrings state are.
+- **`Δ`:** each feature's proposal lists its contract changes. They join `Δ` only when the owner approves that
+  proposal's pull request. Until then they are a request.
+- **Explicitly approved subclass:** a subclass of `AbstractGemProvider` is approved together with the feature
+  that declares it. Awaiting approval: `WritableGemProvider` (`GAL-plugin`), `DeadlineAwareGemProvider`
+  (`GAL-parallel`), and `CachingGemProvider` (`GAL-remember`).
+- **Applicable contract of `p`:** `C` restricted to the classes `p` subclasses. An inherited default satisfies
+  a member unless the declaring feature names the condition under which `p` must override it.
+- **Every feature proposal has a section titled "Abstraction-extension gate"** with these five parts:
+  1. one entry per extension, giving its signature, behavior, implementation owner, actual caller, and
+     acceptance tests;
+  2. the class each extension extends: `AbstractGemProvider`, or a named subclass awaiting approval;
+  3. one entry per `p ∈ P`, giving the contract that applies to it and how it satisfies that contract;
+  4. the baseline tests whose expectations change, by name, or "none";
+  5. a statement that the baseline stays `4438234`.
+- **Rejected by the gate:** the first-version `ProviderSpec` protocol in [Provider contract](#42-provider-contract)
+  is a parallel replacement contract.
+
+### Register
+
+A feature not listed here has `Δ = ∅`: it leaves `B` and the factory as they are, and the gate still applies to
+it. Its pull request shows that every `p ∈ P` still satisfies `B` and that baseline test expectations are kept.
+
+Status values:
+
+- **Declared:** the proposal declares all five parts; implementation waits for the owner's approval.
+- **Locked:** no proposal declares the change yet. Nothing of it is implemented until one does and the owner
+  approves it.
+
+| Feature | Change to `B` | Change to the factory | Status |
+| --- | --- | --- | --- |
+| `GAL-plugin` | `put_gem` moves to `WritableGemProvider` | none | Declared |
+| `GAL-expand` | classmethod `expand()`, not abstract | none | Declared |
+| `GAL-parallel` | subclass `DeadlineAwareGemProvider` | none | Declared |
+| `GAL-remember` | `invalidate`, `revalidate`, `environment_names`; `CachingGemProvider` | `revalidate()` | Declared |
+| `GAL-settings` | `settings_type()` | none | Locked |
+| `GAL-selector` | `selector_type()` | none | Locked |
+| `GAL-sdk-optional` | `supported_os()`, `required_modules()` | `classify()` | Locked |
+| `GAL-discovery` | none | `load_provider_types()`; `types=` | Locked |
+| `GAL-verify` | subclass `VerifiableGemProvider` | none | Locked |
+| `GAL-return-gate` | none | checks every return of `detect` | Locked |
+
+The functions and types that are not members of `AbstractGemProvider`, such as `write_capability` of
+`GAL-plugin`, are declared with the same five parts in their feature's proposal.
+
 ## Feature index
 
 Each feature has one short name. The same name labels the feature's entry in the
@@ -197,7 +306,7 @@ changes a contract, and its entry in the [Specification](#10-specification).
 | `GAL-cli-explain` | `explain` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-validate` | `config validate` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-cli-init` | `config init` command | [Additional pieces](#7-additional-pieces) |
-| `GAL-remember` | Remembered detection with invalidation | [Additional pieces](#7-additional-pieces) |
+| `GAL-remember` | Remembered detection; `invalidate()` on every provider | [GAL-remember.md](gal/GAL-remember.md) |
 | `GAL-verify` | Explicit active verification of one target | [Provider contract](#42-provider-contract) |
 | `GAL-cli-verify` | `verify` command | [Additional pieces](#7-additional-pieces) |
 | `GAL-masked-value` | `SecretValue` wrapper with masked `repr` and `str` | [Additional pieces](#7-additional-pieces) |
@@ -244,10 +353,11 @@ Nothing is rewritten wholesale.
   src/hiddengems/
     __init__.py
 +   __main__.py                              GAL-cli-detect
-~   abstract_provider.py                     GAL-plugin, GAL-expand
+~   abstract_provider.py                     GAL-plugin, GAL-expand, GAL-parallel, GAL-remember
     abstract_provier.py                      removal is a separate decision in GAL-plugin
 ~   abstraction.py                           GAL-settings, GAL-sdk-optional,
-                                             GAL-scope, GAL-chooser, GAL-explain, GAL-verify
+                                             GAL-scope, GAL-chooser, GAL-explain, GAL-verify, GAL-remember
++   atomic_file.py                           GAL-remember (locked file rewrite moved out of dotenv_provider)
 +   chooser.py                               GAL-chooser (prompt moved out of resolve_gem)
 +   cli.py                                   GAL-cli-detect, then one subcommand per GAL-cli-* feature
 +   config.py                                GAL-targets (config reading moved out of HiddenGems.__init__)
@@ -257,8 +367,9 @@ Nothing is rewritten wholesale.
 +   constants/config.py                      GAL-settings
 +   constants/lookup.py                      GAL-settings
 +   constants/platform.py                    GAL-sdk-optional
++   constants/remember.py                    GAL-remember
 +   detection_cache.py                       GAL-remember
-~   gem_provider.py                          GAL-discovery, GAL-sdk-optional
+~   gem_provider.py                          GAL-discovery, GAL-sdk-optional, GAL-remember
 ~   hidden_gems.py                           GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-targets, GAL-local-off,
                                              GAL-scope, GAL-routing, GAL-chooser, GAL-explain,
                                              GAL-write-target, GAL-parallel, GAL-remember, GAL-verify,
@@ -268,23 +379,26 @@ Nothing is rewritten wholesale.
     gems/
       __init__.py
 +     dotenv_constants.py                    GAL-settings
-~     dotenv_provider.py                     GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-local-off
+~     dotenv_provider.py                     GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-local-off,
+                                             GAL-remember
 ~     k8s_provider.py                        GAL-plugin, GAL-expand, GAL-settings, GAL-selector, GAL-sdk-optional,
-                                             GAL-local-off, GAL-kube-contexts, GAL-parallel
+                                             GAL-local-off, GAL-kube-contexts, GAL-parallel, GAL-remember
       keychain_bridge.cpp                changed only by a proposed Keychain feature
       keychain_bridge.h                  changed only by a proposed Keychain feature
       keychain_reader.cpp                changed only by a proposed Keychain feature
       keychain_reader.hpp                changed only by a proposed Keychain feature
 +     keychain_constants.py                  GAL-settings
       keychainorpasswordread.cpp
-~     keyring_provider.py                    GAL-plugin, GAL-settings, GAL-sdk-optional
+~     keyring_provider.py                    GAL-plugin, GAL-settings, GAL-sdk-optional, GAL-remember
 +     kubernetes_constants.py                GAL-settings
 +     onepassword_constants.py               GAL-settings
-~     onepassword_provider.py                GAL-plugin, GAL-settings, GAL-selector, GAL-discovery, GAL-parallel
+~     onepassword_provider.py                GAL-plugin, GAL-settings, GAL-selector, GAL-discovery, GAL-parallel,
+                                             GAL-remember
       types.py
 +     <name>_provider.py, <name>_constants.py   one pair per new provider
   tests/
-+   contract/test_provider_contract.py       GAL-plugin
++   contract/example_providers.py            GAL-plugin, then GAL-parallel and GAL-remember
++   contract/test_provider_contract.py       GAL-plugin, then GAL-parallel and GAL-remember
 +   fixtures/config/                         GAL-targets
 +   frozen_docs.bats                         GAL-readme-frozen
 +   test_hidden_gems_cli.py                  GAL-cli-detect
@@ -413,7 +527,8 @@ Status: this section is the rejected first version and is not part of the specif
 today's method names and splits what a provider MUST and MAY implement; it waits on decision
 `GAL-plugin-contract` in the [Decision register](#9-decision-register). The names used only here,
 `ProviderSpec`, `DetectionReport`, `TargetSettings`, `Selector`, `DetectionContext`, and `Capability`, are
-not part of the specification.
+not part of the specification. The [Abstraction-extension gate](#abstraction-extension-gate) rejects
+`ProviderSpec` as a parallel replacement contract.
 
 The contract extends `AbstractGemProvider` instead of replacing it. Existing providers keep working while
 they move to it.
@@ -609,8 +724,8 @@ as `software-design.md` requires. An earlier version of this section put every c
   `EXPANDED_EVIDENCE_DESCRIPTION: Final[str] = "Found by expanding declared target {target}"` (`GAL-expand`).
 - `DISCOVERY_LOCAL_OPTION: Final[str] = "include_local"`: the detection option the router passes to
   providers (`GAL-local-off`).
-- `DETECTION_LIFETIME_SECONDS: Final[int] = 86_400`: 24 hours, the same default period as the cache
-  direction (`GAL-remember`).
+- `DETECTION_LIFETIME_SECONDS` moves to `constants/remember.py`, with the other `GAL-remember` constants
+  listed in [GAL-remember.md](gal/GAL-remember.md#constants).
 
 `src/hiddengems/constants/platform.py`:
 
@@ -707,7 +822,9 @@ executable named in its [Specification](#10-specification) entry becomes a const
 
 ## 5. Contract impact
 
-Each change below alters a contract or behavior and requires explicit approval before implementation.
+Each change below alters a contract or behavior and requires explicit approval before implementation. Changes
+to `AbstractGemProvider` and the factory are also listed in the [Register](#register) of the
+[Abstraction-extension gate](#abstraction-extension-gate).
 
 - **`GAL-readme-frozen`: a staged change to `docs/README.md` is blocked unless it matches the owner's hash.**
   Gate, strengthening. The pre-commit hook gains one blocking check; lint findings stay non-blocking. Why:
@@ -720,6 +837,10 @@ Each change below alters a contract or behavior and requires explicit approval b
   guard.** Contract extension. Behavior changes: implicit dotenv discovery skips cloud-sync folders and reports
   the skip; a declared plain path that names a directory raises `ValueError` instead of being dropped; a
   declared location that yields nothing is reported ABSENT.
+- **`GAL-remember`: `AbstractGemProvider` gains `invalidate()`, `revalidate()`, and `environment_names`, all
+  with defaults; `CachingGemProvider` holds the shared cache lifecycle.** Contract extension. Behavior change:
+  `HiddenGems` writes the `remembered` key of the config file, and a later `HiddenGems` reuses those records
+  without detecting again while they stay current and valid.
 - **`GAL-selector`: unknown selector key raises `InvalidSelectorError`.** Behavior change, strengthening. Today the
   result is `GemNotFoundError`, which hides the typo.
 - **`GAL-settings`: unknown settings key raises at config load.** Behavior change, strengthening. Today it is
@@ -926,7 +1047,8 @@ events, and write support for Kubernetes and 1Password, which today raise `NotIm
 ## 10. Specification
 
 Each entry names the files it changes (`~`), adds (`+`), or removes (`-`); the names it adds, with signatures;
-the existing tests it changes, by name; and what blocks it. Constants are listed in
+the existing tests it changes, by name; and what blocks it. Every entry is bound by the
+[Abstraction-extension gate](#abstraction-extension-gate). Constants are listed in
 [Constants and limits](#47-constants-and-limits) and libraries in [Libraries](#48-libraries). Names that exist
 today keep their names and signatures. Code moved out of an existing function is labelled as a move.
 
@@ -994,7 +1116,7 @@ Status: locked.
 
 ### GAL-plugin
 
-Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 2. `put_gem` moves to `WritableGemProvider`, the
+Specified in [GAL-plugin.md](gal/GAL-plugin.md), revision 5. `put_gem` moves to `WritableGemProvider`, the
 read-only providers lose their stubs, and `hide_gem` raises `ProviderNotWritableError` before any call to a
 read-only provider. The hooks and shared types of revision 1 moved to the features that call them; that file's
 Scope lists where each one went.
@@ -1111,7 +1233,7 @@ Scope lists where each one went.
 
 ### GAL-expand
 
-Specified in [GAL-expand.md](gal/GAL-expand.md), revision 2. A target expands only when its path is a pattern,
+Specified in [GAL-expand.md](gal/GAL-expand.md), revision 3. A target expands only when its path is a pattern,
 such as `~/clusters/*/kubeconfig`; a plain path names one file. A guard keeps every walk out of home-wide
 trees, cloud-sync folders, network mounts, and online-only files. Every declared location that yields nothing
 is reported ABSENT, and walk outcomes become enums.
@@ -1221,7 +1343,7 @@ is reported ABSENT, and walk outcomes become enums.
 
 ### GAL-parallel
 
-Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 1. It replaces the earlier entry here, which
+Specified in [GAL-parallel.md](gal/GAL-parallel.md), revision 2. It replaces the earlier entry here, which
 bounded only the caller's wait: `Future.result(timeout=...)` does not stop a running call, and
 `cancel_futures=True` does not cancel a started one. Each built-in provider honors a per-lookup `Deadline`,
 a timeout becomes a `LookupIssue`, matches merge in record order, and shutdown waits only for calls that are
@@ -1270,31 +1392,12 @@ themselves bounded.
 
 ### GAL-remember
 
-- **Files:** `+ src/hiddengems/detection_cache.py`, `~ hidden_gems.py`, `~ config.py`.
-- **New names:**
-  - Frozen dataclass `RememberedDetection`, with the fields `records: tuple[DetectedProvider, ...]`,
-    `observed_at: datetime`, `os_name: OsName`, `user: str`, `detector_version: str`, and `config_digest: str`.
-  - `load_remembered(path: Path) -> RememberedDetection | None`.
-  - `save_remembered(path: Path, remembered: RememberedDetection) -> None`.
-  - `is_stale(remembered: RememberedDetection, *, now: datetime, lifetime: timedelta, os_name: OsName,
-    user: str, detector_version: str, config_digest: str) -> bool`.
-  - `HiddenGems.__init__` gains `refresh: bool = False`.
-  - `HiddenGems.invalidate(self) -> None` clears the remembered records and calls each provider's
-    `invalidate()`.
-- **Storage:** the `remembered` key of the config file, as `docs/README.md` describes, with non-secret fields
-  only.
-- **A remembered result is stale, and detected again, when:**
-  - `refresh=True`;
-  - the OS changed;
-  - the user (`getpass.getuser()`) changed;
-  - a remembered evidence path no longer exists;
-  - the config digest changed (the SHA-256 of the canonical JSON of `providers` and `targets`);
-  - the package version changed;
-  - more than `DETECTION_LIFETIME_SECONDS` have passed.
+Specified in [GAL-remember.md](gal/GAL-remember.md), revision 1. `AbstractGemProvider` gains `invalidate()`,
+a no-op by default, and `CachingGemProvider` implements the cache lifecycle once for providers that keep
+state. `HiddenGems.invalidate()` calls the declared hook on every instance. Detection is remembered in the
+config file and reused only while its fingerprint is current and every record revalidates.
 
-  A stale record is never reported as available. Environment changes are covered once providers declare the
-  non-secret variables they read, under `GAL-plugin-contract`.
-- **Blocked by:** `GAL-plugin-contract`; growing detection on a miss also by `GAL-scan-depth`.
+- **Blocked by:** `GAL-plugin`, whose `tests/contract/` kit this feature extends.
 
 ### GAL-verify
 
