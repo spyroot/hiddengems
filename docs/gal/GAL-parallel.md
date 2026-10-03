@@ -1,8 +1,16 @@
 # GAL-parallel: bounded parallel lookup
 
-Status: proposal, revision 1. Not approved for implementation. The owner decides the choices in
+Status: proposal, revision 2. Not approved for implementation. The owner decides the choices in
 [Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
 [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 2 adds three things:
+
+- the [Abstraction-extension gate](#abstraction-extension-gate) section;
+- the [Exceptions](#exceptions) section required by the overview's
+  [exception rules](../provider-routing-design.md#exception-consistency);
+- an injected clock in `Deadline`, so a test can control time without sleeping. `GAL-secure-cache` uses the
+  same `Deadline`.
 
 ## Purpose and observable capability
 
@@ -60,11 +68,13 @@ Out of scope:
 
 `src/hiddengems/abstraction.py`:
 
-- **New: frozen dataclass `Deadline(expires_at: float)`,** a `time.monotonic()` instant.
-  - `@classmethod after(cls, seconds: float) -> Deadline`.
+- **New: frozen dataclass `Deadline(expires_at: float, clock: Callable[[], float] = time.monotonic)`,** an
+  absolute instant on `clock`, which must be monotonic. Tests inject a controlled clock.
+  - `@classmethod after(cls, seconds: float, *, clock: Callable[[], float] = time.monotonic) -> Deadline`,
+    with `expires_at = clock() + seconds`.
   - `@classmethod unbounded(cls) -> Deadline`, with `expires_at = math.inf`. Never `None`.
-  - `remaining(self) -> float`: seconds left, never negative.
-  - `expired(self) -> bool`.
+  - `remaining(self) -> float`: `max(0.0, expires_at - clock())`, never negative.
+  - `expired(self) -> bool`: `clock() >= expires_at`.
 - **New member: `Capability.DEADLINE = "deadline"`,** added to the enum from `GAL-plugin`.
 
 `src/hiddengems/abstract_provider.py`:
@@ -121,6 +131,106 @@ Built-in deadline handling:
 - **dotenv:** reads one local file and checks the deadline before reading. Known limit: a declared file on an
   unresponsive network mount can block inside the operating system. The walk guard of `GAL-expand` keeps
   discovered and expanded files off mounts, but a plain path the user declares on a share is their choice.
+
+## Abstraction-extension gate
+
+This section follows the [gate](../provider-routing-design.md#abstraction-extension-gate) of the overview. The
+baseline is commit `4438234`.
+
+### 1. Extensions
+
+#### `Deadline`
+
+- **Signature:** as listed under `src/hiddengems/abstraction.py` above.
+- **Status:** MUST ADD.
+- **Behavior:** an absolute deadline on an injected monotonic clock; a value, with no side effects.
+- **Implementation owner:** `abstraction.py`.
+- **Actual caller:** `HiddenGems.inspect_gem` and `HiddenGems.dig_gem` create it; every `*_within` method reads
+  it.
+- **Acceptance tests:** `test_timed_out_call_stops_and_lookup_shuts_down` and
+  `test_builtin_providers_stop_at_the_deadline`.
+
+#### `DeadlineAwareGemProvider`
+
+- **Signature:** `class DeadlineAwareGemProvider(AbstractGemProvider)` in `abstract_provider.py`, with the two
+  abstract methods `find_gem_within` and `get_gem_within` listed above. It defines no `__init__` and holds no
+  state.
+- **Status:** optional base class. A provider that subclasses it MUST implement both methods.
+- **Behavior:** each call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON`, within
+  `deadline.remaining()` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`, and every operation it starts ends within that
+  time.
+- **Why it is not a parallel contract:** it subclasses `AbstractGemProvider` and adds two methods under new
+  names. `find_gem` and `get_gem` stay the MUST members with their signatures unchanged, and a built-in's
+  `find_gem` and `get_gem` delegate to the new methods with `Deadline.unbounded()`. A provider that does not
+  subclass it keeps working, through the non-cooperative decision.
+- **Implementation owner:** `abstract_provider.py`; all four built-ins subclass it.
+- **Actual caller:** `HiddenGems.inspect_gem`, step 3, and `HiddenGems.dig_gem`.
+- **Acceptance tests:** `test_builtin_providers_stop_at_the_deadline`,
+  `test_parallel_lookup_never_exceeds_lookup_workers`, and `test_parallel_merge_ignores_completion_order`.
+
+#### `deadline_capability` and `Capability.DEADLINE`
+
+- **Signature:** `def deadline_capability(provider_type: type[AbstractGemProvider]) -> CapabilityObservation` in
+  `abstract_provider.py`, and the enum member `Capability.DEADLINE = "deadline"`.
+- **Status:** MUST ADD.
+- **Behavior:** the same rules and order as `write_capability` of `GAL-plugin`, with
+  `DeadlineAwareGemProvider` in place of `WritableGemProvider` and `find_gem_within` in place of `put_gem`: a
+  non-provider input raises `TypeError`; the subclass gives `SUPPORTED`; a `find_gem_within` resolved through
+  the method resolution order gives `UNKNOWN`; anything else gives `UNSUPPORTED`. Source:
+  `EvidenceSource.PROVIDER_CLASS`. Never `None`.
+- **Implementation owner:** `abstract_provider.py`.
+- **Actual caller:** `HiddenGems.inspect_gem`, step 3.
+- **Acceptance tests:** `test_deadline_capability_reports_each_state`.
+
+#### `HiddenGems.inspect_gem` and `HiddenGems.dig_gem`
+
+- **Signature:** unchanged.
+- **Status:** behavior change.
+- **Behavior:** the steps listed under `src/hiddengems/hidden_gems.py` above.
+- **Implementation owner:** `hidden_gems.py`.
+- **Actual caller:** the caller of the library.
+- **Acceptance tests:** every case in `tests/test_hidden_gems_routing.py` below, and the existing routing tests,
+  unchanged.
+
+### 2. What each extension extends
+
+`DeadlineAwareGemProvider` is a subclass of `AbstractGemProvider`, awaiting the owner's approval with this
+proposal. `B` loses no member and changes no signature. The factory is unchanged.
+
+### 3. Providers in P
+
+| Provider | Applicable contract | `deadline_capability` | How it stops at the deadline |
+| --- | --- | --- | --- |
+| `OnePasswordProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | CLI timeout kills `op`; SDK under `wait_for` |
+| `DotEnvProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | checks the deadline before reading |
+| `KeyringProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | per the Keychain decision |
+| `KubernetesProvider` | `DeadlineAwareGemProvider` | `SUPPORTED` | `_request_timeout` from the remaining time |
+
+### 4. Baseline tests whose expectations change
+
+None. `test_unchecked_onepassword_does_not_silently_return_old_keyring` gains a second parameter value with the
+same assertions, and `FakeProvider` gains keyword arguments whose defaults keep every current test unchanged.
+
+### 5. Baseline
+
+The baseline stays commit `4438234`. This proposal does not redefine `B`.
+
+## Exceptions
+
+No new class. Each situation reuses an existing one, under the overview's exception rules:
+
+- **A provider that runs out of time** raises `ProviderLookupError(TIMEOUT_REASON, TIMEOUT_NEXT_ACTION,
+  matches)`. That class already means "this instance could not be checked; no absence is implied", which is
+  exactly a timeout, and the router already turns it into a `LookupIssue`.
+- **A wait that times out in the router** (`TimeoutError` from `Future.result`) becomes the same `LookupIssue`,
+  so `dig_gem` raises `IncompleteGemLookupError`, as for any unchecked provider.
+- **A non-cooperative provider under option (a)** becomes a `LookupIssue` with `NO_DEADLINE_REASON`, not an
+  exception.
+- **`deadline_capability` with a non-provider input** raises `TypeError`, as `write_capability` does.
+- **The 1Password CLI's `subprocess.TimeoutExpired`** is translated to `ProviderLookupError`, as
+  `onepassword_provider.py` already does today.
+
+`test_exception_classes_match_the_register` of `GAL-plugin` therefore needs no new entry for this feature.
 
 ## Constants
 
