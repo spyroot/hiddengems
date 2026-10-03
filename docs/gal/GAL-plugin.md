@@ -1,8 +1,11 @@
 # GAL-plugin: writable capability for providers
 
-Status: proposal, revision 2. Not approved for implementation. The owner chooses between the two alternatives
-in [Alternatives](#alternatives-for-the-owners-decision); this document recommends option two. The overview of
-all features is [provider-routing-design.md](../provider-routing-design.md).
+Status: proposal, revision 3. Not approved for implementation. The owner decides the choices in
+[Alternatives](#alternatives-for-the-owners-decision); this document recommends option two with the legacy
+writer path. The overview of all features is [provider-routing-design.md](../provider-routing-design.md).
+
+Revision 3 corrects revision 2's claim that no third-party provider can reach `hide_gem` today, and adds the
+policy for those providers.
 
 ## Purpose and observable capability
 
@@ -90,9 +93,16 @@ Option two changes these files. Option one changes none.
   1. Select the record exactly as today: `ProviderRequiredError` when no provider is given,
      `ProviderNotAvailableError` when none matches, `AmbiguousGemError` when more than one matches.
   2. Look up that record's instance.
-  3. If `not isinstance(instance, WritableGemProvider)`, raise
-     `ProviderNotWritableError(record.provider, record.instance_id)`.
-  4. Otherwise call `put_gem` exactly as today.
+  3. If `isinstance(instance, WritableGemProvider)`, call `put_gem` exactly as today.
+  4. Otherwise, with the legacy writer path (see Alternatives): if the instance's class defines a callable
+     `put_gem`, emit `DeprecationWarning` with `LEGACY_WRITER_WARNING` and call it exactly as today.
+  5. Otherwise raise `ProviderNotWritableError(record.provider, record.instance_id)`.
+
+  Without the legacy writer path, step 4 is skipped.
+- **New constant, legacy writer path only:**
+  `LEGACY_WRITER_WARNING: Final[str] = "{provider_class} defines put_gem without subclassing WritableGemProvider;
+  subclass WritableGemProvider to keep writing"` in `hidden_gems.py`, formatted with the class name. It names
+  the class only, never the gem or its value.
 - **Callers of `put_gem`:** the only production caller is `hidden_gems.py:351`, found by searching the
   repository for `.put_gem(`. The only test caller is `tests/test_hidden_gems_dotenv.py:442`, on `DotEnvProvider`
   directly.
@@ -117,10 +127,15 @@ None. `abc` is already in use.
   strengthening for callers.
 - **Direct calls to a read-only provider's `put_gem`,** outside `hide_gem`, now raise `AttributeError` instead of
   `NotImplementedError`. No such call exists in the repository.
-- **Third-party providers:** none is affected today. `GemProvider.create` (`gem_provider.py:73-82`) builds only
-  the four types in the closed `provider_types` tuple and raises `ValueError` for any other name, and
-  `HiddenGems` builds every instance through it (`hidden_gems.py:146`). A third-party provider can be registered
-  only after `GAL-discovery`, which lands later and documents this contract for authors.
+- **Third-party providers can be affected today.** `GemProvider.provider_types` (`gem_provider.py:22`) is a
+  public class attribute that a caller can replace, and `tests/test_hidden_gems_dotenv.py:328` replaces it.
+  `GemProvider.create` (`gem_provider.py:73-84`) builds whatever class that tuple holds, and `HiddenGems` builds
+  every instance through it (`hidden_gems.py:146`). So a class derived from today's `AbstractGemProvider` with a
+  real `put_gem`, registered that way, is written to by `hide_gem` today.
+  - With the legacy writer path, it keeps working and gets a `DeprecationWarning`. Its migration is a one-line
+    change: subclass `WritableGemProvider` instead of `AbstractGemProvider`.
+  - Without it, `hide_gem` raises `ProviderNotWritableError` for that class until it makes the same change.
+    That is a compatibility break, disclosed here for the owner's decision.
 - **Gates:** unchanged.
 
 ## Alternatives for the owner's decision
@@ -135,6 +150,17 @@ The `put_gem` decision:
     keeps today's stub behavior.
 - **Option two: move `put_gem` to `WritableGemProvider`,** as specified above. Recommended: it removes the
   incomplete implementations, and the check in `hide_gem` no longer depends on what a stub does.
+
+Legacy writers, a decision that applies only with option two:
+
+- **With the legacy writer path (recommended).** A provider that is not a `WritableGemProvider` but whose class
+  defines a callable `put_gem` is still written to, with a `DeprecationWarning`. Existing behavior is kept for
+  every caller. The built-in read-only providers have no `put_gem` after the stubs are removed, so they are
+  refused. A third-party stub that only raises `NotImplementedError` still raises it from the call, as it does
+  today. Removing the path later is its own decision.
+- **Without it.** Only `WritableGemProvider` subclasses are written to. A legacy writer registered through
+  `provider_types` raises `ProviderNotWritableError` until its author changes the base class. This is the
+  compatibility break described under Behavior and compatibility.
 
 Removing `src/hiddengems/abstract_provier.py`, a separate decision:
 
@@ -182,6 +208,14 @@ Cases:
     - it raises `ProviderNotWritableError`, which is also a `NotImplementedError`;
     - the provider recorded no call;
     - neither `"X"` nor `"fake-value"` appears in the message.
+- `test_legacy_writer_registered_through_provider_types`.
+  - Input: a test class derived from `AbstractGemProvider`, not `WritableGemProvider`, whose `put_gem` records
+    its call and returns a reference; `GemProvider.provider_types` replaced with a tuple holding it, through
+    `monkeypatch.setattr` as in `tests/test_hidden_gems_dotenv.py:328`; `HiddenGems` holding one record of
+    it; `hide_gem("X", "fake-value", provider=...)`.
+  - Expected with the legacy writer path: one `DeprecationWarning` whose message names the class and contains
+    neither `"X"` nor `"fake-value"`; `put_gem` called once; its reference returned.
+  - Expected without it: `ProviderNotWritableError`; `put_gem` never called.
 - **Writes through dotenv still work.** Input: the existing write tests, unchanged:
   `test_dotenv_provider_put_returns_only_reference_metadata`,
   `test_add_and_overwrite_preserve_other_entries_and_comments`, and
