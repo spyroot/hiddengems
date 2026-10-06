@@ -6,7 +6,7 @@ spec:
   source:
     localPath: /Users/spyroot/dev/standards
     repository: https://github.com/spyroot/standards
-    revision: 23e8e7e893d3c38ad49a057effa4754de0f97fef
+    revision: 56a579c2d86addb7bae0591f8fc1750561b168d7
   requiredContracts:
     - ci
     - unit-testing
@@ -19,7 +19,12 @@ spec:
     - bash-shell-standards
     - helm-ci-standards
     - policy-authority-standards
+    - documentation-contract
+    - documentation-rules
+    - software-design
+    - python-standards
   providers: []
   projectAdditions:
+    - .coordination/pr-coordinator-policy.md
     - TEAM_GUIDE.md
   exceptions: []
