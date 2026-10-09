@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import import_module
-from typing import Any, ClassVar, Tuple
+from typing import Any, ClassVar
 
 from hiddengems.abstract_provider import AbstractGemProvider
 from hiddengems.abstraction import DetectedProvider
@@ -19,7 +20,7 @@ OnePasswordProvider = import_module(
 class GemProvider:
     """Register plugins without knowing their configuration fields."""
 
-    provider_types: ClassVar[Tuple[Tuple[AbstractGemProvider], ...]] = (
+    provider_types: ClassVar[tuple[type[AbstractGemProvider], ...]] = (
         OnePasswordProvider,
         DotEnvProvider,
         KeyringProvider,
@@ -27,7 +28,9 @@ class GemProvider:
     )
 
     @classmethod
-    def detect(cls, **options: Any) -> Tuple[DetectedProvider, ...]:
+    def detect(
+            cls, **options: Any
+    ) -> tuple[DetectedProvider, ...]:
         """
         :param options:
         :return:
@@ -40,6 +43,7 @@ class GemProvider:
         by_name = {
             provider_type.name: provider_type for provider_type in cls.provider_types
         }
+
         ordered_names = [*options, *(name for name in by_name if name not in options)]
         records: list[DetectedProvider] = []
         seen: set[tuple[str, str]] = set()
@@ -48,7 +52,7 @@ class GemProvider:
             settings = options.get(name, {})
             if isinstance(settings, list):
                 settings = {"instances": settings}
-            if not isinstance(settings, dict):
+            if not isinstance(settings, Mapping):
                 raise TypeError(
                     f"{provider_type.name!r} configuration must be an object or list"
                 )
