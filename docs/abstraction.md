@@ -20,10 +20,10 @@ The existing interface keeps these members:
 | --- | --- | --- | --- |
 | `name: ClassVar[str]` | MUST | Stable provider kind shared by its records and references | Factory |
 | `__init__(**settings: Any)` | MUST | Settings for one detected instance; returns `None` | `GemProvider.create` |
-| `detect(**options: Any)` | MUST, class method | Detection options; returns `tuple[DetectedProvider, ...]` | `GemProvider.detect` |
-| `find_gem(name, *, criteria=None)` | MUST | Name and read-only criteria; returns `tuple[GemReference, ...]` | `HiddenGems.inspect_gem` |
+| `detect` | MUST, class method | Options; `tuple[DetectedProvider, ...]` | `GemProvider.detect` |
+| `find_gem` | MUST | Name, read-only criteria; `tuple[GemReference, ...]` | `HiddenGems.inspect_gem` |
 | `get_gem(reference)` | MUST | One selected reference; returns `Sequence[Gem]` | `HiddenGems.dig_gem` |
-| `put_gem(name, value, *, criteria=None, dry_run=False)` | MUST | Name, value and write options; returns `GemReference` | `HiddenGems.hide_gem` |
+| `put_gem` | MUST | Name, value, criteria, dry run; `GemReference` | `HiddenGems.hide_gem` |
 
 An inherited concrete implementation satisfies a MUST. A provider does not need an empty override just to
 repeat its parent's method. Detection describes concrete instances; references describe locations without
