@@ -5,8 +5,8 @@ Mustafa Bayramov mbayramov@cisco.com / spyroot@gmail.com
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from typing import Any, ClassVar, List, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar
 
 from hiddengems.abstraction import (
     DetectedProvider, Gem, GemReference)
@@ -29,7 +29,7 @@ class AbstractGemProvider(ABC):
 
     @classmethod
     @abstractmethod
-    def detect(cls, **options: Any) -> Tuple[DetectedProvider, ...]:
+    def detect(cls, **options: Any) -> tuple[DetectedProvider, ...]:
         """Discover local provider configuration without authentication."""
         raise NotImplementedError
 
@@ -44,8 +44,8 @@ class AbstractGemProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_gem(self, reference: GemReference) -> List[Gem]:
-        """Return values for one reference, including a singleton as a list."""
+    def get_gem(self, reference: GemReference) -> Sequence[Gem]:
+        """Return values as a sequence, wrapping a singleton as one element."""
         raise NotImplementedError
 
     @abstractmethod

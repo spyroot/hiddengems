@@ -7,9 +7,9 @@ spyroot@gmail.com
 
 from __future__ import annotations
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any
 
 from hiddengems.abstraction import (
     DetectedProvider,
@@ -97,7 +97,7 @@ class HiddenGems:
         self.preferences = {**documented_preferences, **(preferences or {})}
         configured = {**configured, **(provider_settings or {})}
         known = {item.name for item in GemProvider.provider_types}
-        hints: dict[str, list[dict[str, Any]]] = {}
+        hints: dict[str, list[MutableMapping[str, Any]]] = {}
 
         for preference in self.preferences.values():
             kind, _, details = self._selection(preference)
@@ -120,7 +120,7 @@ class HiddenGems:
             options = configured.get(kind, {})
             if isinstance(options, list):
                 options = {"instances": options}
-            if not isinstance(options, dict):
+            if not isinstance(options, Mapping):
                 raise TypeError(f"{kind!r} provider settings must be an object")
             detection_options[kind] = {**options, "preferences": hints.get(kind, [])}
 
@@ -157,10 +157,11 @@ class HiddenGems:
     @staticmethod
     def _selection(
             selected: str | Mapping[str, Any] | None,
-    ) -> Tuple[str | None, str | None, dict[str, Any]]:
-        """
-        :param selected:
-        :return:
+    ) -> tuple[str | None, str | None, MutableMapping[str, Any]]:
+        """Normalize a preference without mutating the caller's mapping.
+
+        :param selected: A provider name, preference mapping, or no preference.
+        :returns: Provider, instance ID, and a fresh mutable criteria mapping.
         """
         if selected is None:
             return None, None, {}
@@ -171,6 +172,7 @@ class HiddenGems:
         provider = selected.get("provider")
         if provider is not None and not isinstance(provider, str):
             raise TypeError("A provider preference must be a string")
+
         return (
             provider,
             selected.get("instance_id"),
@@ -308,7 +310,7 @@ class HiddenGems:
             *,
             provider: str | None = None,
             criteria: Mapping[str, Any] | None = None,
-    ) -> List[Gem]:
+    ) -> list[Gem]:
         """Return the resolved provider's values, always as a list.
 
         :param name:
@@ -317,8 +319,10 @@ class HiddenGems:
         :return:
         """
         reference = self.resolve_gem(name, provider=provider, criteria=criteria)
-        return self._instances[(reference.provider, reference.instance_id)].get_gem(
-            reference
+        return list(
+            self._instances[(reference.provider, reference.instance_id)].get_gem(
+                reference
+            )
         )
 
     def hide_gem(

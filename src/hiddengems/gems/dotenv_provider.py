@@ -17,7 +17,7 @@ from io import StringIO
 from itertools import islice
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, ClassVar, TypeGuard, Tuple
+from typing import Any, ClassVar, TypeGuard
 
 from dotenv import dotenv_values, set_key
 
@@ -637,7 +637,7 @@ class DotEnvProvider(AbstractGemProvider):
             name: str,
             *,
             criteria: Mapping[str, Any] | None = None,
-    ) -> Tuple[GemReference, ...]:
+    ) -> tuple[GemReference, ...]:
         """
         Return a non-secret reference when this file contains ``name``.
         :param name:

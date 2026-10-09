@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import IO, Any, TypeAlias, Tuple, Dict
+from typing import IO, Any, TypeAlias
 
 
 class ProviderNotAvailableError(LookupError):
@@ -55,8 +55,8 @@ class DetectedProvider:
     provider: str
     instance_id: str
     state: ProviderState
-    evidence: Tuple[DetectionEvidence, ...]
-    settings: Dict[str, Any]
+    evidence: tuple[DetectionEvidence, ...]
+    settings: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ class GemReference:
     instance_id: str
     created_at: datetime | None = None
     modified_at: datetime | None = None
-    location: Dict[str, Any] | str | None = None
+    location: dict[str, Any] | str | None = None
 
 
 class ProviderLookupError(Exception):
@@ -78,7 +78,7 @@ class ProviderLookupError(Exception):
             self,
             reason: str,
             next_action: str,
-            matches: Tuple[GemReference, ...] = (),
+            matches: tuple[GemReference, ...] = (),
     ) -> None:
         self.reason = reason
         self.next_action = next_action
@@ -107,7 +107,7 @@ class ProviderObservation:
     provider: str
     instance_id: str
     state: ProviderState | None
-    evidence: Tuple[DetectionEvidence, ...]
+    evidence: tuple[DetectionEvidence, ...]
 
 
 @dataclass(frozen=True)
@@ -115,9 +115,9 @@ class LookupResult:
     """Confirmed locations and providers that could not be checked."""
 
     name: str
-    matches: Tuple[GemReference, ...]
-    issues: Tuple[LookupIssue, ...]
-    providers: Tuple[ProviderObservation, ...] = ()
+    matches: tuple[GemReference, ...]
+    issues: tuple[LookupIssue, ...]
+    providers: tuple[ProviderObservation, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """Return printable metadata only; gem values are never included."""
