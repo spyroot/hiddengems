@@ -97,7 +97,8 @@ refactor does not claim to reject every malformed record or unexpected key at ru
 
 `AbstractGemProvider.get_gem(reference: GemReference) -> Sequence[Gem]` exposes what the consumer needs:
 an ordered collection of values. A provider may return a list or tuple. Existing providers return lists and
-remain compatible. A single gem is wrapped as one element; a bare string is not the intended result container.
+remain compatible. A single gem is wrapped as one element. `HiddenGems.dig_gem()` rejects a bare `str` or
+`bytes` result with `TypeError`, preventing accidental conversion into characters or integers.
 
 `HiddenGems.dig_gem()` retains its public `list[Gem]` result by applying `list(...)` only to the outer sequence.
 For example, a provider result `(["a", "b"],)` becomes `[["a", "b"]`. The inner list is one gem; it must

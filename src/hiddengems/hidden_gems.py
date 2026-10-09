@@ -317,13 +317,15 @@ class HiddenGems:
         :param provider:
         :param criteria:
         :return:
+        :raises TypeError: If a provider returns a bare string or bytes value.
         """
         reference = self.resolve_gem(name, provider=provider, criteria=criteria)
-        return list(
-            self._instances[(reference.provider, reference.instance_id)].get_gem(
-                reference
-            )
+        values = self._instances[(reference.provider, reference.instance_id)].get_gem(
+            reference
         )
+        if isinstance(values, (str, bytes)):
+            raise TypeError("A provider must return a sequence containing gem values")
+        return list(values)
 
     def hide_gem(
             self,

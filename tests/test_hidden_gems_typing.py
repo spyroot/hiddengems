@@ -167,3 +167,55 @@ def test_dig_gem_normalizes_provider_tuple_without_flattening_nested_value(
 
     assert isinstance(result, list)
     assert result == ["fake-token", ["nested-a", "nested-b"]]
+
+
+@pytest.mark.parametrize("outer_result", ("fake-token", b"fake-token"))
+def test_dig_gem_rejects_scalar_outer_provider_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outer_result: str | bytes,
+) -> None:
+    """Bare scalar results cannot be normalized into a gem list."""
+    record = DetectedProvider(
+        "fixture",
+        "fixture:local",
+        ProviderState.CONFIGURED,
+        (),
+        {},
+    )
+    reference = GemReference("TOKEN", record.provider, record.instance_id)
+
+    class ScalarProvider:
+        def find_gem(
+            self,
+            name: str,
+            *,
+            criteria: Mapping[str, Any] | None = None,
+        ) -> tuple[GemReference, ...]:
+            """Return the single deterministic fake reference."""
+            assert name == reference.name
+            assert criteria == {}
+            return (reference,)
+
+        def get_gem(self, selected: GemReference) -> str | bytes:
+            """Return an invalid bare scalar instead of a result sequence."""
+            assert selected == reference
+            return outer_result
+
+    provider = ScalarProvider()
+
+    def create(
+        cls: type[GemProvider], selected: DetectedProvider
+    ) -> ScalarProvider:
+        """Return the fake provider for the requested record."""
+        assert selected == record
+        return provider
+
+    monkeypatch.setattr(GemProvider, "create", classmethod(create))
+    gems = HiddenGems(
+        providers=(record,),
+        config_path=tmp_path / "missing.json",
+    )
+
+    with pytest.raises(TypeError):
+        gems.dig_gem("TOKEN")
