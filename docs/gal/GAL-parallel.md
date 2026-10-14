@@ -1,115 +1,26 @@
-# GAL-parallel: bounded parallel lookup
+# NOT_IMPLEMENTED: GAL-parallel — bounded parallel lookup
 
-Status: proposal, revision 10. Not approved for implementation. The owner decides the choices in
-[Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
-[provider-routing-design.md](../provider-routing-design.md).
+- grounding: GROUNDED
+- implementation: NOT_IMPLEMENTED
+- verification: UNVERIFIED
+- planningStage: PROPOSED
 
-Revision 10 answers review finding GPA8 and the advisories of the review of revision 9:
+## Authority
 
-- GPA8: a confirmed child exit no longer implies that the receiver thread has ended. The exit gate keeps half
-  of `CHILD_EXIT_GATE_SECONDS` for the receiver phase and then reads `receiver_thread.is_alive()`; a receiver
-  that is still alive after a confirmed exit raises `ProviderLookupError(CHILD_RECEIVER_REASON,
-  CHILD_RECEIVER_NEXT_ACTION)`. Step 3 also uses `is_alive()` to decide whether an outcome is complete.
-- The early-exception cleanup is an `except BaseException` handler, not a `finally`, so a normal call never
-  kills or joins twice.
-- `os.set_inheritable` is stated as covering exec only; a process forked without exec is reported through the
-  receiver phase.
-- New cases cover the expired-deadline guard, the early-exception cleanup, confirmation by the sentinel
-  alone, a receiver that outlives the child, and the router's report of a held child.
+This revises the proposal merged in [PR #4](https://github.com/spyroot/hiddengems/pull/4).
+The [delivery map](DELIVERY.md#authority) identifies the exact source snapshot, Standards principles and
+accepted owner decisions. The original [design](../README.md) and [routing overview](../provider-routing-design.md)
+remain unchanged. B stays 4438234; approved deltas do not redefine it. The owner requested this planning
+revision on 2026-10-14; it does not authorize feature implementation.
 
-Revision 9 corrects the acceptance cases and the exit gate of `run_in_child` after review:
+## Consumer
 
-- the parent joins the receiver thread only after a confirmed exit, so the held-child case returns within its
-  bound;
-- the partial-frame case uses the fake context and writes the frame header before the wait begins, so it
-  exercises the partial frame;
-- the exit gate is `CHILD_EXIT_GATE_SECONDS`, half the grace, so `run_in_child` returns before the router's
-  wait ends and the router sees `CHILD_LINGERING_REASON`;
-- an expired deadline starts no child, and a `finally` kills the child when an exception, such as
-  `KeyboardInterrupt`, leaves the wait early;
-- `_child_main` makes the pipe non-inheritable, `_receive_outcome` turns any exception into `None` and closes
-  the pipe in a `finally`, and the exit is also confirmed by the process sentinel.
+Library callers use `inspect_gem`, `resolve_gem` and `dig_gem` under one lookup deadline. They receive
+references, values or lookup issues without coordinating pools or constructing provider processes.
 
-Revision 8 answers review findings GPA6 and GPA7 in `run_in_child`:
+## Motivation
 
-- GPA7: the outcome is received in a daemon receiver thread, `_receive_outcome`, and the parent waits for that
-  thread only until the deadline. A partial or slow frame counts as nothing complete, so it cannot hold the parent
-  past the deadline. No payload limit is added.
-- GPA6: every path passes one exit gate, bounded by the grace. The parent unpickles a received outcome only after
-  the child's exit is confirmed; otherwise it discards the outcome unread and reports `CHILD_LINGERING_REASON`.
-
-Revision 7 answers review findings GPA5, GPA4, and GP17:
-
-- GPA5: the child runs two declared module-level operations, `child_find` and `child_get` in `child_runner.py`,
-  which build the instance with `GemProvider.create(record, types=(provider_type,))`. Outcomes cross the pipe as
-  plain data, because `ProviderLookupError` passes only its reason to `Exception`, so a pickled error object
-  cannot be rebuilt. Under dotenv option (b), the child runs `_dotenv_entry_present` and `_dotenv_entry_raw`,
-  which hold today's readability check and read; the file's device is read once, when the instance is created,
-  and never during a lookup.
-- GPA4: the deadline contract has two parts, return and execution. Under dotenv option (b) and non-cooperative
-  option (b), a killed child that the operating system still holds keeps only the return part: the call reports
-  it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and interpreter exit waits for it.
-  Both options state this weaker part for the owner.
-- GP17: `DEADLINE_CAPABILITY_INPUT_ERROR` names only the input's type, never its value.
-
-Revision 6 answers review findings GPA3 and GPA4. GPA3: under non-cooperative option (b), a value that pickle
-cannot send from the child, such as an IO stream, makes `_get_in_child` raise
-`ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`, and the owner decides between that
-declared rejection and a mode-0600 temporary file. GPA4, Kubernetes: the known limit is replaced by a bounded
-read, `_read_secret_within`, which reads the body in chunks and checks the deadline before each one. GPA4, dotenv:
-the read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread, becomes an owner
-decision between a weaker contract for that case and a read in a bounded child for a file on another device.
-
-Revision 5 aligns this proposal with the second round of decisions. `_resolve_within` takes no `remember`;
-`resolve_gem` and `dig_gem` apply it after `_resolve_within` returns. `LOOKUP_TIMEOUT_SECONDS` comes from
-`GAL-settings`, which also moves `KEYCHAIN_ABI_VERSION`; Keychain option (a) raises it to 2, and `keyring_provider.py`
-keeps the names the keyring tests read. The 1Password SDK fallback uses its own `ONEPASSWORD_SDK_NO_DEADLINE_*`
-constants, both declarations of `KEYCHAIN_INTERACTION_NOT_ALLOWED` give the value 3, and under Keychain option (a)
-no lookup shows a Keychain prompt. `GAL-scope` and `GAL-chooser` are listed as requirements, and the router's gate
-entries name their acceptance tests.
-
-Revision 4 aligns names, modules, and dependencies with the other feature proposals:
-
-- `LEGACY_DEADLINE_WARNING` and the new `deadline_capability` reason constants live in
-  `constants/capability.py`, which `GAL-plugin` creates.
-- `deadline_capability` takes `provider_type: type`. `UNKNOWN` requires both `find_gem_within` and
-  `get_gem_within` to resolve. The reused `DeprecationWarning` is listed under [Exceptions](#exceptions).
-- One deadline per lookup: `inspect_gem` and `resolve_gem` delegate to the new private `_inspect_within` and
-  `_resolve_within`, and `dig_gem` shares one deadline between resolution and the read. The read chooses by
-  `deadline_capability`.
-- A lookup with no records skips the thread pool.
-- Non-cooperative option (b) is specified as `_find_in_child` and `_get_in_child`, which build the instance through
-  `GAL-discovery`.
-- Keychain option (a) names its native files and constants and raises `KEYCHAIN_ABI_VERSION` from 1 to 2. Under
-  Keychain option (b), `KeyringProvider` is `UNSUPPORTED`.
-- If the SDK test fails, an SDK-only 1Password instance raises `ONEPASSWORD_SDK_NO_DEADLINE_REASON` under a finite
-  deadline.
-- The Purpose states the two known limits, `GAL-secure-cache` is listed as a dependent, and the baseline trace notes
-  that patched class limits keep working.
-
-Revision 3 corrects revision 2, whose claim that no baseline test changes did not hold:
-
-- `deadline_capability` raises `TypeError` only for an input that is not a class. Any class, including the
-  routing suite's `FakeProvider`, which does not subclass `AbstractGemProvider`, is classified.
-- An `UNKNOWN` provider, one that defines `find_gem_within` without the base class, runs in process with a
-  `DeprecationWarning`, mirroring the legacy writer path of `GAL-plugin`. Only an `UNSUPPORTED` provider takes
-  the non-cooperative path.
-- With an unbounded deadline, every built-in makes exactly today's calls. Arguments that exist only for a
-  bound are passed only when the deadline is finite. Two baseline tests fake those calls with exact
-  signatures.
-- Each baseline routing test is traced through the new path under
-  [Baseline tests whose expectations change](#4-baseline-tests-whose-expectations-change).
-- The Kubernetes and SDK limits are stated as facts and acceptance conditions.
-
-Revision 2 added three things:
-
-- the [Abstraction-extension gate](#abstraction-extension-gate) section;
-- the [Exceptions](#exceptions) section required by the overview's
-  [exception rules](../provider-routing-design.md#exception-consistency);
-- an injected clock in `Deadline`, so a test can control time without sleeping. `GAL-secure-cache` uses the
-  same `Deadline`.
-
-## Purpose and observable capability
+### Purpose and observable capability
 
 A lookup checks its providers in parallel, never runs more calls at once than `LOOKUP_WORKERS`, and finishes
 within `LOOKUP_TIMEOUT_SECONDS` plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`. Every provider call it starts also stops
@@ -134,22 +45,21 @@ like a provider that could not be checked today. The merged result does not depe
 
   So each provider call must stop by itself at its deadline, or run where it can be stopped.
 
-## Scope
+## Diagram
 
-In scope:
+```mermaid
+flowchart LR
+  Caller -->|inspect / resolve / dig| Router["HiddenGems: one Deadline"]
+  Router -->|ordered work and budget| Pool["Lookup coordinator"]
+  Pool -->|within methods or approved child adapter| Providers
+  Providers -->|references and timeout issues| Pool
+  Pool -->|ordered result and cleanup outcome| Router
+  Router -->|candidates or selected read| Caller
+```
 
-- a per-lookup deadline;
-- a deadline-aware provider interface, and the capability that reports it;
-- deadline handling in the four built-in providers;
-- the parallel router and its shutdown;
-- the acceptance cases, as extensions of the existing test suites.
+Data/control edges are labeled above. The existing layout below identifies module ownership.
 
-Out of scope:
-
-- the explicit-versus-implicit and unchecked-scope decisions (`GAL-explicit-implicit`, `GAL-unchecked-scope`);
-- the runtime check of provider returns (proposed `GAL-return-gate`).
-
-## Layout
+### Layout
 
 ```text
 ~ src/hiddengems/abstraction.py                  Deadline; Capability.DEADLINE
@@ -179,7 +89,43 @@ Out of scope:
 ~ tests/contract/test_provider_contract.py       deadline contract cases
 ```
 
-## Names, signatures, errors, and call sites
+## Implementation Plan
+
+NOT_IMPLEMENTED: GAL-parallel
+
+Main `4641927` queries instances sequentially. Its 1Password CLI timeout is partial bounded behavior,
+not the proposed common deadline. `DeadlineAwareGemProvider` and router `within` methods are absent.
+
+### Current decisions and conflicts
+
+**PARALLEL-01:** select legacy UNKNOWN handling, non-cooperative providers, non-transferable values,
+Keychain prompting and unresponsive mounts. These choices alter compatibility or lifetime guarantees.
+Bounded execution conflicts with options permitting lingering children/receiver threads. Approve those
+exceptions explicitly; caller return does not prove that work ended. SDK cancellation still needs evidence.
+Preserve `put_gem` in the base and apply PR #11's sequence typing as a separate delta.
+
+The public API stays synchronous. The coordinator owns its pool and child runner; each SDK adapter owns
+request cancellation and cleanup. `Deadline` is shared data, not a second construction boundary.
+
+Detailed alternatives below retain the merged proposal as review evidence. Identified conflicts block the
+affected implementation; they are not permission to choose or rewrite its contract.
+
+### Scope
+
+In scope:
+
+- a per-lookup deadline;
+- a deadline-aware provider interface, and the capability that reports it;
+- deadline handling in the four built-in providers;
+- the parallel router and its shutdown;
+- the acceptance cases, as extensions of the existing test suites.
+
+Out of scope:
+
+- the explicit-versus-implicit and unchecked-scope decisions (`GAL-explicit-implicit`, `GAL-unchecked-scope`);
+- the runtime check of provider returns (proposed `GAL-return-gate`).
+
+### Names, signatures, errors, and call sites
 
 `src/hiddengems/abstraction.py`:
 
@@ -198,7 +144,11 @@ Out of scope:
   names, so the signatures of `find_gem` and `get_gem` stay unchanged:
   - `find_gem_within(self, name: str, *, criteria: Mapping[str, Any] | None = None, deadline: Deadline)
     -> tuple[GemReference, ...]`;
-  - `get_gem_within(self, reference: GemReference, *, deadline: Deadline) -> list[Gem]`.
+  - `get_gem_within(self, reference: GemReference, *, deadline: Deadline) -> Sequence[Gem]`.
+
+  The provider-facing result follows PR #11: a sequence of values, never a bare string/bytes.
+  Router and child-process adapters normalize only that outer sequence to `list[Gem]`; they retain
+  a list-valued gem as a nested value. Full element and metadata validation remains RETURN-01.
 
   Contract, in two parts, each bounded by the deadline plus `LOOKUP_SHUTDOWN_GRACE_SECONDS`:
   - **Return:** the call returns, or raises `ProviderLookupError` with `TIMEOUT_REASON` and its partial matches,
@@ -330,14 +280,328 @@ Built-in deadline handling:
     `run_in_child(_dotenv_entry_raw, (self.path, reference.name), deadline)`. Only a `bool` or one raw value
     crosses the pipe; `parser_fn` runs in the parent, so no callable crosses it.
 
-## Abstraction-extension gate
+### Constants
+
+In `src/hiddengems/constants/lookup.py`, beside the constants the overview already lists:
+
+- `LOOKUP_WORKERS: Final[int] = 8`, added by this feature. `LOOKUP_TIMEOUT_SECONDS: Final[float] = 20.0` is added by
+  `GAL-settings` with `CLI_TIMEOUT_SECONDS`; this feature uses it.
+- `LOOKUP_SHUTDOWN_GRACE_SECONDS: Final[float] = 1.0`: the time a cooperative call has to notice its deadline and
+  return. The acceptance bound is the timeout plus this grace.
+- `LOOKUP_THREAD_PREFIX: Final[str] = "hiddengems-lookup"`: names the worker threads, so a test can show that
+  none outlives the lookup.
+- `TIMEOUT_REASON` and `TIMEOUT_NEXT_ACTION`, as in the overview.
+- `NO_DEADLINE_REASON: Final[str] = "Provider cannot honor a lookup deadline"` and
+  `NO_DEADLINE_NEXT_ACTION: Final[str] = "Subclass DeadlineAwareGemProvider"`, used under non-cooperative
+  option (a) and, under option (b), for a class that pickle cannot reference by name.
+- `CHILD_START_METHOD: Final[str] = "spawn"`, used only under non-cooperative option (b) or dotenv option (b).
+- `CHILD_TRANSPORT_REASON: Final[str] = "The value cannot cross the child-process boundary"` and
+  `CHILD_TRANSPORT_NEXT_ACTION: Final[str] = "Ask the provider's author to subclass DeadlineAwareGemProvider"`,
+  used under non-cooperative option (b) for a value that pickle cannot send, per the child read decision.
+- `CHILD_LINGERING_REASON: Final[str] = "The provider's child process was killed, but the operating system still
+  holds it"` and `CHILD_LINGERING_NEXT_ACTION: Final[str] = "Check the device or mount the provider reads, then
+  retry"`, used by `run_in_child` for a killed child whose exit is not confirmed.
+- `CHILD_RECEIVER_REASON: Final[str] = "The provider's child process exited, but its result pipe is still
+  open"` and `CHILD_RECEIVER_NEXT_ACTION: Final[str] = "Check for a process the provider started that is still
+  running, then retry"`, used by `run_in_child` when the receiver thread outlives a confirmed exit.
+- `CHILD_EXIT_GATE_SECONDS: Final[float] = LOOKUP_SHUTDOWN_GRACE_SECONDS / 2`: the bound of the exit gate of
+  `run_in_child`, half the grace, so that `run_in_child` returns before the router's wait for its future ends.
+- `CHILD_RECEIVER_THREAD_NAME: Final[str] = "hiddengems-child-receiver"`: names the thread in which `run_in_child`
+  receives the outcome, so a test can show that it ends with a confirmed exit.
+- `CHILD_ERROR_MESSAGE: Final[str] = "The provider raised {error_type} in its child process"` and
+  `CHILD_EXIT_MESSAGE: Final[str] = "The provider's child process exited with code {exitcode} before sending a
+  result"`, the `RuntimeError` messages of `run_in_child`.
+
+In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants. Under
+`GAL-plugin` option one, which adds no write constants, this feature creates the module:
+
+- `DEADLINE_SUPPORTED_REASON: Final[str] = "Subclasses DeadlineAwareGemProvider"`.
+- `DEADLINE_LEGACY_REASON: Final[str] = "Resolves find_gem_within and get_gem_within without subclassing
+  DeadlineAwareGemProvider"`.
+- `DEADLINE_UNSUPPORTED_REASON: Final[str] = "Does not subclass DeadlineAwareGemProvider and resolves no deadline
+  methods"`.
+- `DEADLINE_CAPABILITY_INPUT_ERROR: Final[str] = "deadline_capability needs a class, not an instance of
+  {type_name}"`.
+- `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without subclassing
+  DeadlineAwareGemProvider; subclass it to keep parallel lookup"`.
+
+In `gems/onepassword_constants.py`, which `GAL-settings` creates:
+
+- `ONEPASSWORD_SDK_NO_DEADLINE_REASON: Final[str] = "The 1Password SDK cannot stop at a lookup deadline"` and
+  `ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION: Final[str] = "Install or enable the 1Password CLI for this account, then
+  retry"`, used by `OnePasswordProvider` for an SDK-only instance under a finite deadline if
+  `test_onepassword_sdk_work_ends_at_the_deadline` does not pass.
+
+In `gems/kubernetes_constants.py`, which `GAL-settings` creates:
+
+- `KUBE_READ_SLICE_SECONDS: Final[float] = 1.0` and `KUBE_READ_CHUNK_BYTES: Final[int] = 65_536`, used by
+  `_read_secret_within` under a finite deadline: the slice caps each connect and socket read, and each
+  `response.read1` call reads at most one chunk.
+
+In `src/hiddengems/gems/keychain_constants.py`, which `GAL-settings` creates, under Keychain option (a) only:
+
+- `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`: the new bridge status, mirroring
+  `HG_KEYCHAIN_INTERACTION_NOT_ALLOWED = 3`.
+- `KEYCHAIN_ABI_VERSION: Final[int] = 2`: moved by `GAL-settings` from `_HG_KEYCHAIN_ABI_VERSION = 1` at
+  `keyring_provider.py:29`, and raised here from 1 to 2. `keyring_provider.py` keeps `_HG_KEYCHAIN_ABI_VERSION` and
+  `_HG_KEYCHAIN_OK` bound to `KEYCHAIN_ABI_VERSION` and `KEYCHAIN_OK`, because
+  `tests/test_hidden_gems_keyring.py:32,55` reads them.
+- `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`.
+
+### Libraries
+
+None. `concurrent.futures`, `asyncio`, `subprocess`, `multiprocessing`, `threading`, and `time` are in the
+standard library.
+
+### Behavior and compatibility
+
+- **Lookups run in parallel and are bounded,** except, under dotenv option (a), the read of a declared file on an
+  unresponsive mount. Under dotenv option (b) and non-cooperative option (b), a killed child that the operating
+  system still holds is reported with `CHILD_LINGERING_REASON` instead of waited for, and interpreter exit waits
+  for it; a result pipe that another process still holds is reported with `CHILD_RECEIVER_REASON`. Behavior
+  change: a lookup that hangs today now ends with an Incomplete result naming the
+  provider that ran out of time.
+- **The result is unchanged in shape and order.** `LookupResult` is the same, and matches stay in record order.
+- **`AbstractGemProvider` gains no required member.** `DeadlineAwareGemProvider` is an additional interface, and
+  `find_gem` and `get_gem` keep their signatures.
+- **Third-party providers** that do not subclass `DeadlineAwareGemProvider` are handled by the non-cooperative
+  decision below. That decision is a compatibility choice for the owner.
+- **Gates:** unchanged.
+
+### Alternatives for the owner's decision
+
+An `UNKNOWN` provider, one that defines `find_gem_within` and `get_gem_within` without subclassing
+`DeadlineAwareGemProvider`:
+
+- **(a) Call it in process, with a `DeprecationWarning` (recommended).** It declares the methods, so it is
+  trusted to honor the deadline, exactly as `GAL-plugin`'s legacy writer path trusts a `put_gem`. The baseline
+  routing fakes keep working unchanged in their assertions.
+- **(b) Treat it as non-cooperative.** Then `FakeProvider` must subclass `DeadlineAwareGemProvider`, which
+  also requires it to implement `detect` and, under `GAL-plugin` option one, `put_gem`.
+
+A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
+
+- **(a) Refuse it in parallel lookup.** It is never called. Its lookups become a `LookupIssue` with
+  `NO_DEADLINE_REASON` and `NO_DEADLINE_NEXT_ACTION`. Simple and bounded, but a provider registered by replacing
+  `GemProvider.provider_types` stops being checked until its author adopts the interface.
+- **(b) Run it in a child process** started with `CHILD_START_METHOD`, through `HiddenGems._find_in_child` and
+  `HiddenGems._get_in_child`, which run `child_find` and `child_get` as `run_in_child` states. The child is killed
+  at the deadline and builds the instance with `GemProvider.create(record, types=(provider_type,))` from
+  `GAL-discovery`; the class crosses the pipe by module and qualified name; a class that pickle cannot reference by
+  name is handled as under option (a). The call returns within the deadline plus grace. The weaker part: a killed
+  child that the operating system still holds is reported with `CHILD_LINGERING_REASON`, reaped once it exits,
+  and waited for at interpreter exit; a receiver thread that another process keeps waiting is reported with
+  `CHILD_RECEIVER_REASON`. Compatible, at the cost of a process per call, and values for `dig_gem`
+  crossing a local pipe between the user's own processes; a value that pickle cannot send is handled per the child
+  read decision below. Recommended: it keeps every registered provider usable.
+- A third option, running it without a bound, fails the gate, so it is not offered.
+
+A child read, under non-cooperative option (b), of a value that cannot cross the pipe, such as an IO stream.
+Rejecting it narrows what an `UNSUPPORTED` provider may return under that option, so the owner decides:
+
+- **(a) Reject the value with the declared error.** The child sends nothing for the value, and `_get_in_child`
+  raises `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`. Recommended: nothing secret is
+  written anywhere.
+- **(b) Hand the stream over in a temporary file.** The child writes the stream to a mode-0600 temporary file, and
+  the parent returns an open file object the caller owns, at the cost of the secret at rest on disk. Any other
+  value that cannot cross the pipe still gets the declared error of (a).
+
+The Keychain, whose query can wait on an authorization prompt:
+
+- **(a) Query without interactive UI.** The native read asks the Keychain not to prompt. A locked or
+  authorization-gated item then returns at once and is reported UNKNOWN, with the next action
+  `KEYCHAIN_LOCKED_NEXT_ACTION`. No lookup then shows a Keychain prompt; an item that needs one is reported UNKNOWN
+  with `KEYCHAIN_LOCKED_NEXT_ACTION` and is never cached by `GAL-secure-cache`. This changes the native bridge and
+  raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain existence feature builds on version 2.
+  Recommended: a parallel lookup never waits on a dialog.
+- **(b) Treat the Keychain as non-cooperative.** `KeyringProvider` does not subclass `DeadlineAwareGemProvider`
+  and is `UNSUPPORTED`. It goes through the chosen non-cooperative path, and its prompt can still appear until the
+  deadline ends it.
+
+The read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread:
+
+- **(a) Accept a weaker contract for that named case.** `SUPPORTED` means bounded, except a read of a declared
+  file on an unresponsive mount, which the lookup waits for. Neither the return part nor the execution part of the
+  contract holds for that read.
+- **(b) Read a file on another device in a bounded child.** A declared dotenv file whose device, stored when the
+  instance is created, differs from the home directory's is checked and read through `run_in_child` under a
+  finite deadline, as Built-in deadline handling states. The parent makes no system call on that path during a
+  lookup. The return part of the contract always holds: the lookup returns within the deadline plus grace. The
+  execution part holds except for a killed child that the operating system still holds in an uninterruptible
+  wait: the lookup reports it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and
+  interpreter exit waits for it. A receiver thread that a process forked by the provider keeps waiting is
+  reported with `CHILD_RECEIVER_REASON`. A file on the home directory's own device is read in process, so the home
+  directory is taken as responsive. Recommended: no lookup waits on an unresponsive mount, and a held child is
+  reported rather than hidden.
+
+### Proposal history
+
+Status: proposal, revision 10. Not approved for implementation. The owner decides the choices in
+[Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
+[provider-routing-design.md](../provider-routing-design.md).
+
+Revision 10 answers review finding GPA8 and the advisories of the review of revision 9:
+
+- GPA8: a confirmed child exit no longer implies that the receiver thread has ended. The exit gate keeps half
+  of `CHILD_EXIT_GATE_SECONDS` for the receiver phase and then reads `receiver_thread.is_alive()`; a receiver
+  that is still alive after a confirmed exit raises `ProviderLookupError(CHILD_RECEIVER_REASON,
+  CHILD_RECEIVER_NEXT_ACTION)`. Step 3 also uses `is_alive()` to decide whether an outcome is complete.
+- The early-exception cleanup is an `except BaseException` handler, not a `finally`, so a normal call never
+  kills or joins twice.
+- `os.set_inheritable` is stated as covering exec only; a process forked without exec is reported through the
+  receiver phase.
+- New cases cover the expired-deadline guard, the early-exception cleanup, confirmation by the sentinel
+  alone, a receiver that outlives the child, and the router's report of a held child.
+
+Revision 9 corrects the acceptance cases and the exit gate of `run_in_child` after review:
+
+- the parent joins the receiver thread only after a confirmed exit, so the held-child case returns within its
+  bound;
+- the partial-frame case uses the fake context and writes the frame header before the wait begins, so it
+  exercises the partial frame;
+- the exit gate is `CHILD_EXIT_GATE_SECONDS`, half the grace, so `run_in_child` returns before the router's
+  wait ends and the router sees `CHILD_LINGERING_REASON`;
+- an expired deadline starts no child, and a `finally` kills the child when an exception, such as
+  `KeyboardInterrupt`, leaves the wait early;
+- `_child_main` makes the pipe non-inheritable, `_receive_outcome` turns any exception into `None` and closes
+  the pipe in a `finally`, and the exit is also confirmed by the process sentinel.
+
+Revision 8 answers review findings GPA6 and GPA7 in `run_in_child`:
+
+- GPA7: the outcome is received in a daemon receiver thread, `_receive_outcome`, and the parent waits for that
+  thread only until the deadline. A partial or slow frame counts as nothing complete, so it cannot hold the parent
+  past the deadline. No payload limit is added.
+- GPA6: every path passes one exit gate, bounded by the grace. The parent unpickles a received outcome only after
+  the child's exit is confirmed; otherwise it discards the outcome unread and reports `CHILD_LINGERING_REASON`.
+
+Revision 7 answers review findings GPA5, GPA4, and GP17:
+
+- GPA5: the child runs two declared module-level operations, `child_find` and `child_get` in `child_runner.py`,
+  which build the instance with `GemProvider.create(record, types=(provider_type,))`. Outcomes cross the pipe as
+  plain data, because `ProviderLookupError` passes only its reason to `Exception`, so a pickled error object
+  cannot be rebuilt. Under dotenv option (b), the child runs `_dotenv_entry_present` and `_dotenv_entry_raw`,
+  which hold today's readability check and read; the file's device is read once, when the instance is created,
+  and never during a lookup.
+- GPA4: the deadline contract has two parts, return and execution. Under dotenv option (b) and non-cooperative
+  option (b), a killed child that the operating system still holds keeps only the return part: the call reports
+  it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and interpreter exit waits for it.
+  Both options state this weaker part for the owner.
+- GP17: `DEADLINE_CAPABILITY_INPUT_ERROR` names only the input's type, never its value.
+
+Revision 6 answers review findings GPA3 and GPA4. GPA3: under non-cooperative option (b), a value that pickle
+cannot send from the child, such as an IO stream, makes `_get_in_child` raise
+`ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`, and the owner decides between that
+declared rejection and a mode-0600 temporary file. GPA4, Kubernetes: the known limit is replaced by a bounded
+read, `_read_secret_within`, which reads the body in chunks and checks the deadline before each one. GPA4, dotenv:
+the read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread, becomes an owner
+decision between a weaker contract for that case and a read in a bounded child for a file on another device.
+
+Revision 5 aligns this proposal with the second round of decisions. `_resolve_within` takes no `remember`;
+`resolve_gem` and `dig_gem` apply it after `_resolve_within` returns. `LOOKUP_TIMEOUT_SECONDS` comes from
+`GAL-settings`, which also moves `KEYCHAIN_ABI_VERSION`; Keychain option (a) raises it to 2, and `keyring_provider.py`
+keeps the names the keyring tests read. The 1Password SDK fallback uses its own `ONEPASSWORD_SDK_NO_DEADLINE_*`
+constants, both declarations of `KEYCHAIN_INTERACTION_NOT_ALLOWED` give the value 3, and under Keychain option (a)
+no lookup shows a Keychain prompt. `GAL-scope` and `GAL-chooser` are listed as requirements, and the router's gate
+entries name their acceptance tests.
+
+Revision 4 aligns names, modules, and dependencies with the other feature proposals:
+
+- `LEGACY_DEADLINE_WARNING` and the new `deadline_capability` reason constants live in
+  `constants/capability.py`, which `GAL-plugin` creates.
+- `deadline_capability` takes `provider_type: type`. `UNKNOWN` requires both `find_gem_within` and
+  `get_gem_within` to resolve. The reused `DeprecationWarning` is listed under [Exceptions](#exceptions).
+- One deadline per lookup: `inspect_gem` and `resolve_gem` delegate to the new private `_inspect_within` and
+  `_resolve_within`, and `dig_gem` shares one deadline between resolution and the read. The read chooses by
+  `deadline_capability`.
+- A lookup with no records skips the thread pool.
+- Non-cooperative option (b) is specified as `_find_in_child` and `_get_in_child`, which build the instance through
+  `GAL-discovery`.
+- Keychain option (a) names its native files and constants and raises `KEYCHAIN_ABI_VERSION` from 1 to 2. Under
+  Keychain option (b), `KeyringProvider` is `UNSUPPORTED`.
+- If the SDK test fails, an SDK-only 1Password instance raises `ONEPASSWORD_SDK_NO_DEADLINE_REASON` under a finite
+  deadline.
+- The Purpose states the two known limits, `GAL-secure-cache` is listed as a dependent, and the baseline trace notes
+  that patched class limits keep working.
+
+Revision 3 corrects revision 2, whose claim that no baseline test changes did not hold:
+
+- `deadline_capability` raises `TypeError` only for an input that is not a class. Any class, including the
+  routing suite's `FakeProvider`, which does not subclass `AbstractGemProvider`, is classified.
+- An `UNKNOWN` provider, one that defines `find_gem_within` without the base class, runs in process with a
+  `DeprecationWarning`, mirroring the legacy writer path of `GAL-plugin`. Only an `UNSUPPORTED` provider takes
+  the non-cooperative path.
+- With an unbounded deadline, every built-in makes exactly today's calls. Arguments that exist only for a
+  bound are passed only when the deadline is finite. Two baseline tests fake those calls with exact
+  signatures.
+- Each baseline routing test is traced through the new path under
+  [Baseline tests whose expectations change](#4-baseline-tests-whose-expectations-change).
+- The Kubernetes and SDK limits are stated as facts and acceptance conditions.
+
+Revision 2 added three things:
+
+- the [Abstraction-extension gate](#abstraction-extension-gate) section;
+- the [Exceptions](#exceptions) section required by the overview's
+  [exception rules](../provider-routing-design.md#exception-consistency);
+- an injected clock in `Deadline`, so a test can control time without sleeping. `GAL-secure-cache` uses the
+  same `Deadline`.
+
+## PR Order
+
+Planning PR I-parallel, wave W4, is one bounded delivery, not a GitHub PR number.
+
+Plugin supplies agreed capability records; settings supplies constants; scope/chooser supplies target and
+choice resolution. Child construction also consumes discovery. Deliver the coordinator with applicable
+concrete deadline implementations. Secure-cache consumes Deadline. Remember is independent once its own
+prerequisites exist.
+
+The [cross-GAL map](DELIVERY.md#pr-order) covers all 38 IDs. The details below name the concrete prerequisites.
+
+### Dependencies on other features
+
+- **Requires:**
+  - `GAL-plugin`, for `Capability`, `CapabilityObservation`, `EvidenceSource.PROVIDER_CLASS`, and
+    `constants/capability.py`;
+  - `GAL-settings`, which introduces `constants/lookup.py` with `LOOKUP_TIMEOUT_SECONDS`,
+    `gems/keychain_constants.py`, `gems/kubernetes_constants.py`, and `gems/onepassword_constants.py`;
+  - `GAL-scope` (plan 4.1) and `GAL-chooser` (plan 4.3), whose `target` and `choice` parameters `_inspect_within` and
+    `_resolve_within` take;
+  - `GAL-discovery` under non-cooperative option (b) or dotenv option (b), for
+    `GemProvider.create(record, types=(provider_type,))`.
+- **Required by:** `GAL-secure-cache`, which uses `Deadline`, its injected clock, `_resolve_within`,
+  `get_gem_within`, and `TIMEOUT_NEXT_ACTION`.
+- **Overlaps:** Keychain option (a) changes the native bridge, as the proposed Keychain existence feature does.
+  Under Keychain option (a), this feature raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain
+  existence feature builds on version 2.
+- **Answers:** the overview's earlier `GAL-parallel` entry, which bounded only the caller's wait.
+
+## Gates
+
+### Requirement traceability
+
+These requirements derive from Authority and the original scope below. They belong to GAL-parallel,
+I-parallel / W4; PR Order names their dependencies. Implementation is classified above and verification
+is UNVERIFIED. Named cases below are proposed enforcement, not recorded runs.
+
+| Requirement | Deliverable / owner | Acceptance / remaining gap |
+| --- | --- | --- |
+| GPAR-TIME | Deadline/coordinator | Budget and shutdown cases |
+| GPAR-P | Concrete providers | Per-provider timeout/cleanup |
+| GPAR-COMPAT | Process/legacy adapters | PARALLEL-01 selected contracts |
+| GPAR-ORDER | Router | Stable candidates and partial results |
+
+Acceptance covers types, ownership, wiring and all applicable providers under C = B plus approved delta.
+Baseline expectations change only through explicit approval. Use the existing
+[validation surface](DELIVERY.md#gates); record the candidate SHA and actual results. No feature
+implementation or new validation mechanism is part of this planning revision.
+
+### Abstraction-extension gate
 
 This section follows the [gate](../provider-routing-design.md#abstraction-extension-gate) of the overview. The
 baseline is commit `4438234`.
 
-### 1. Extensions
+#### 1. Extensions
 
-#### `Deadline`
+##### `Deadline`
 
 - **Signature:** as listed under `src/hiddengems/abstraction.py` above.
 - **Status:** MUST ADD.
@@ -348,7 +612,7 @@ baseline is commit `4438234`.
 - **Acceptance tests:** `test_timed_out_call_stops_and_lookup_shuts_down` and
   `test_builtin_providers_stop_at_the_deadline`.
 
-#### `DeadlineAwareGemProvider`
+##### `DeadlineAwareGemProvider`
 
 - **Signature:** `class DeadlineAwareGemProvider(AbstractGemProvider)` in `abstract_provider.py`, with the two
   abstract methods `find_gem_within` and `get_gem_within` listed above. It defines no `__init__` and holds no
@@ -373,7 +637,7 @@ baseline is commit `4438234`.
   `test_kernel_held_child_is_reported_apart_from_a_confirmed_exit` under dotenv option (b),
   `test_parallel_lookup_never_exceeds_lookup_workers`, and `test_parallel_merge_ignores_completion_order`.
 
-#### `deadline_capability` and `Capability.DEADLINE`
+##### `deadline_capability` and `Capability.DEADLINE`
 
 - **Signature:** `def deadline_capability(provider_type: type) -> CapabilityObservation` in
   `abstract_provider.py`, and the enum member `Capability.DEADLINE = "deadline"`.
@@ -391,7 +655,7 @@ baseline is commit `4438234`.
 - **Acceptance tests:** `test_deadline_capability_reports_each_state` and
   `test_deadline_capability_type_errors_do_not_expose_input_values`.
 
-#### `HiddenGems.inspect_gem` and `HiddenGems.dig_gem`
+##### `HiddenGems.inspect_gem` and `HiddenGems.dig_gem`
 
 - **Signature:** unchanged, for these two and for `HiddenGems.resolve_gem`.
 - **Status:** behavior change.
@@ -409,7 +673,7 @@ baseline is commit `4438234`.
   `test_namespace_only_preference_resolves_unique_cluster`, and
   `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`.
 
-#### `HiddenGems._inspect_within` and `HiddenGems._resolve_within`
+##### `HiddenGems._inspect_within` and `HiddenGems._resolve_within`
 
 - **Signature:** `_inspect_within(self, name: str, *, provider: str | None, target: str | None, criteria:
   Mapping[str, Any] | None, deadline: Deadline) -> LookupResult` and `_resolve_within(self, name: str, *,
@@ -427,7 +691,7 @@ baseline is commit `4438234`.
   `test_namespace_only_preference_resolves_unique_cluster`, and
   `test_bounded_scan_reports_incomplete_but_explicit_path_is_checked`.
 
-#### `run_in_child`, `child_find`, `child_get`, `HiddenGems._find_in_child`, and `HiddenGems._get_in_child`
+##### `run_in_child`, `child_find`, `child_get`, `HiddenGems._find_in_child`, and `HiddenGems._get_in_child`
 
 - **Signature:** in the new module `src/hiddengems/child_runner.py`:
   - `run_in_child(target: Callable[..., T], args: tuple[Any, ...], deadline: Deadline) -> T`: runs
@@ -553,7 +817,7 @@ baseline is commit `4438234`.
   `test_run_in_child_kills_the_child_on_an_early_exception`, `test_child_exit_confirmed_by_the_sentinel_alone`, and
   `test_router_reports_a_held_child_as_lingering`.
 
-#### Keychain interaction-not-allowed status
+##### Keychain interaction-not-allowed status
 
 - **Signature:** in `gems/keychain_constants.py`, which `GAL-settings` creates:
   `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`, mirroring the new `HG_KEYCHAIN_INTERACTION_NOT_ALLOWED = 3`
@@ -571,12 +835,12 @@ baseline is commit `4438234`.
 - **Actual caller:** `KeyringProvider.find_gem_within` and `KeyringProvider.get_gem_within`.
 - **Acceptance tests:** the Keychain case of `test_builtin_providers_stop_at_the_deadline`.
 
-### 2. What each extension extends
+#### 2. What each extension extends
 
 `DeadlineAwareGemProvider` is a subclass of `AbstractGemProvider`, awaiting the owner's approval with this
 proposal. `B` loses no member and changes no signature. The factory is unchanged.
 
-### 3. Providers in P
+#### 3. Providers in P
 
 | Provider | `deadline_capability` | How it stops at the deadline |
 | --- | --- | --- |
@@ -594,7 +858,7 @@ proposal. `B` loses no member and changes no signature. The factory is unchanged
 
   Under `GAL-plugin` option one, `WritableGemProvider` does not exist, and no provider subclasses it.
 
-### 4. Baseline tests whose expectations change
+#### 4. Baseline tests whose expectations change
 
 None. Each of the nine baseline routing tests, traced through the new code:
 
@@ -630,11 +894,11 @@ The keyring tests at `tests/test_hidden_gems_keyring.py:32,55` read `_HG_KEYCHAI
 and `KEYCHAIN_OK`. Their fake library returns `keyring._HG_KEYCHAIN_ABI_VERSION` as its ABI version, so raising it
 to 2 under Keychain option (a) does not break them.
 
-### 5. Baseline
+#### 5. Baseline
 
 The baseline stays commit `4438234`. This proposal does not redefine `B`.
 
-## Exceptions
+### Exceptions
 
 No new class. Each situation reuses an existing one, under the overview's exception rules:
 
@@ -671,161 +935,7 @@ No new class. Each situation reuses an existing one, under the overview's except
 
 `test_exception_classes_match_the_register` of `GAL-plugin` therefore needs no new entry for this feature.
 
-## Constants
-
-In `src/hiddengems/constants/lookup.py`, beside the constants the overview already lists:
-
-- `LOOKUP_WORKERS: Final[int] = 8`, added by this feature. `LOOKUP_TIMEOUT_SECONDS: Final[float] = 20.0` is added by
-  `GAL-settings` with `CLI_TIMEOUT_SECONDS`; this feature uses it.
-- `LOOKUP_SHUTDOWN_GRACE_SECONDS: Final[float] = 1.0`: the time a cooperative call has to notice its deadline and
-  return. The acceptance bound is the timeout plus this grace.
-- `LOOKUP_THREAD_PREFIX: Final[str] = "hiddengems-lookup"`: names the worker threads, so a test can show that
-  none outlives the lookup.
-- `TIMEOUT_REASON` and `TIMEOUT_NEXT_ACTION`, as in the overview.
-- `NO_DEADLINE_REASON: Final[str] = "Provider cannot honor a lookup deadline"` and
-  `NO_DEADLINE_NEXT_ACTION: Final[str] = "Subclass DeadlineAwareGemProvider"`, used under non-cooperative
-  option (a) and, under option (b), for a class that pickle cannot reference by name.
-- `CHILD_START_METHOD: Final[str] = "spawn"`, used only under non-cooperative option (b) or dotenv option (b).
-- `CHILD_TRANSPORT_REASON: Final[str] = "The value cannot cross the child-process boundary"` and
-  `CHILD_TRANSPORT_NEXT_ACTION: Final[str] = "Ask the provider's author to subclass DeadlineAwareGemProvider"`,
-  used under non-cooperative option (b) for a value that pickle cannot send, per the child read decision.
-- `CHILD_LINGERING_REASON: Final[str] = "The provider's child process was killed, but the operating system still
-  holds it"` and `CHILD_LINGERING_NEXT_ACTION: Final[str] = "Check the device or mount the provider reads, then
-  retry"`, used by `run_in_child` for a killed child whose exit is not confirmed.
-- `CHILD_RECEIVER_REASON: Final[str] = "The provider's child process exited, but its result pipe is still
-  open"` and `CHILD_RECEIVER_NEXT_ACTION: Final[str] = "Check for a process the provider started that is still
-  running, then retry"`, used by `run_in_child` when the receiver thread outlives a confirmed exit.
-- `CHILD_EXIT_GATE_SECONDS: Final[float] = LOOKUP_SHUTDOWN_GRACE_SECONDS / 2`: the bound of the exit gate of
-  `run_in_child`, half the grace, so that `run_in_child` returns before the router's wait for its future ends.
-- `CHILD_RECEIVER_THREAD_NAME: Final[str] = "hiddengems-child-receiver"`: names the thread in which `run_in_child`
-  receives the outcome, so a test can show that it ends with a confirmed exit.
-- `CHILD_ERROR_MESSAGE: Final[str] = "The provider raised {error_type} in its child process"` and
-  `CHILD_EXIT_MESSAGE: Final[str] = "The provider's child process exited with code {exitcode} before sending a
-  result"`, the `RuntimeError` messages of `run_in_child`.
-
-In `src/hiddengems/constants/capability.py`, which `GAL-plugin` creates, beside its write constants. Under
-`GAL-plugin` option one, which adds no write constants, this feature creates the module:
-
-- `DEADLINE_SUPPORTED_REASON: Final[str] = "Subclasses DeadlineAwareGemProvider"`.
-- `DEADLINE_LEGACY_REASON: Final[str] = "Resolves find_gem_within and get_gem_within without subclassing
-  DeadlineAwareGemProvider"`.
-- `DEADLINE_UNSUPPORTED_REASON: Final[str] = "Does not subclass DeadlineAwareGemProvider and resolves no deadline
-  methods"`.
-- `DEADLINE_CAPABILITY_INPUT_ERROR: Final[str] = "deadline_capability needs a class, not an instance of
-  {type_name}"`.
-- `LEGACY_DEADLINE_WARNING: Final[str] = "{provider_class} defines find_gem_within without subclassing
-  DeadlineAwareGemProvider; subclass it to keep parallel lookup"`.
-
-In `gems/onepassword_constants.py`, which `GAL-settings` creates:
-
-- `ONEPASSWORD_SDK_NO_DEADLINE_REASON: Final[str] = "The 1Password SDK cannot stop at a lookup deadline"` and
-  `ONEPASSWORD_SDK_NO_DEADLINE_NEXT_ACTION: Final[str] = "Install or enable the 1Password CLI for this account, then
-  retry"`, used by `OnePasswordProvider` for an SDK-only instance under a finite deadline if
-  `test_onepassword_sdk_work_ends_at_the_deadline` does not pass.
-
-In `gems/kubernetes_constants.py`, which `GAL-settings` creates:
-
-- `KUBE_READ_SLICE_SECONDS: Final[float] = 1.0` and `KUBE_READ_CHUNK_BYTES: Final[int] = 65_536`, used by
-  `_read_secret_within` under a finite deadline: the slice caps each connect and socket read, and each
-  `response.read1` call reads at most one chunk.
-
-In `src/hiddengems/gems/keychain_constants.py`, which `GAL-settings` creates, under Keychain option (a) only:
-
-- `KEYCHAIN_INTERACTION_NOT_ALLOWED: Final[int] = 3`: the new bridge status, mirroring
-  `HG_KEYCHAIN_INTERACTION_NOT_ALLOWED = 3`.
-- `KEYCHAIN_ABI_VERSION: Final[int] = 2`: moved by `GAL-settings` from `_HG_KEYCHAIN_ABI_VERSION = 1` at
-  `keyring_provider.py:29`, and raised here from 1 to 2. `keyring_provider.py` keeps `_HG_KEYCHAIN_ABI_VERSION` and
-  `_HG_KEYCHAIN_OK` bound to `KEYCHAIN_ABI_VERSION` and `KEYCHAIN_OK`, because
-  `tests/test_hidden_gems_keyring.py:32,55` reads them.
-- `KEYCHAIN_LOCKED_NEXT_ACTION: Final[str] = "Unlock the Keychain or allow access, then re-run"`.
-
-## Libraries
-
-None. `concurrent.futures`, `asyncio`, `subprocess`, `multiprocessing`, `threading`, and `time` are in the
-standard library.
-
-## Behavior and compatibility
-
-- **Lookups run in parallel and are bounded,** except, under dotenv option (a), the read of a declared file on an
-  unresponsive mount. Under dotenv option (b) and non-cooperative option (b), a killed child that the operating
-  system still holds is reported with `CHILD_LINGERING_REASON` instead of waited for, and interpreter exit waits
-  for it; a result pipe that another process still holds is reported with `CHILD_RECEIVER_REASON`. Behavior
-  change: a lookup that hangs today now ends with an Incomplete result naming the
-  provider that ran out of time.
-- **The result is unchanged in shape and order.** `LookupResult` is the same, and matches stay in record order.
-- **`AbstractGemProvider` gains no required member.** `DeadlineAwareGemProvider` is an additional interface, and
-  `find_gem` and `get_gem` keep their signatures.
-- **Third-party providers** that do not subclass `DeadlineAwareGemProvider` are handled by the non-cooperative
-  decision below. That decision is a compatibility choice for the owner.
-- **Gates:** unchanged.
-
-## Alternatives for the owner's decision
-
-An `UNKNOWN` provider, one that defines `find_gem_within` and `get_gem_within` without subclassing
-`DeadlineAwareGemProvider`:
-
-- **(a) Call it in process, with a `DeprecationWarning` (recommended).** It declares the methods, so it is
-  trusted to honor the deadline, exactly as `GAL-plugin`'s legacy writer path trusts a `put_gem`. The baseline
-  routing fakes keep working unchanged in their assertions.
-- **(b) Treat it as non-cooperative.** Then `FakeProvider` must subclass `DeadlineAwareGemProvider`, which
-  also requires it to implement `detect` and, under `GAL-plugin` option one, `put_gem`.
-
-A non-cooperative provider, one whose `deadline_capability` is `UNSUPPORTED`:
-
-- **(a) Refuse it in parallel lookup.** It is never called. Its lookups become a `LookupIssue` with
-  `NO_DEADLINE_REASON` and `NO_DEADLINE_NEXT_ACTION`. Simple and bounded, but a provider registered by replacing
-  `GemProvider.provider_types` stops being checked until its author adopts the interface.
-- **(b) Run it in a child process** started with `CHILD_START_METHOD`, through `HiddenGems._find_in_child` and
-  `HiddenGems._get_in_child`, which run `child_find` and `child_get` as `run_in_child` states. The child is killed
-  at the deadline and builds the instance with `GemProvider.create(record, types=(provider_type,))` from
-  `GAL-discovery`; the class crosses the pipe by module and qualified name; a class that pickle cannot reference by
-  name is handled as under option (a). The call returns within the deadline plus grace. The weaker part: a killed
-  child that the operating system still holds is reported with `CHILD_LINGERING_REASON`, reaped once it exits,
-  and waited for at interpreter exit; a receiver thread that another process keeps waiting is reported with
-  `CHILD_RECEIVER_REASON`. Compatible, at the cost of a process per call, and values for `dig_gem`
-  crossing a local pipe between the user's own processes; a value that pickle cannot send is handled per the child
-  read decision below. Recommended: it keeps every registered provider usable.
-- A third option, running it without a bound, fails the gate, so it is not offered.
-
-A child read, under non-cooperative option (b), of a value that cannot cross the pipe, such as an IO stream.
-Rejecting it narrows what an `UNSUPPORTED` provider may return under that option, so the owner decides:
-
-- **(a) Reject the value with the declared error.** The child sends nothing for the value, and `_get_in_child`
-  raises `ProviderLookupError(CHILD_TRANSPORT_REASON, CHILD_TRANSPORT_NEXT_ACTION)`. Recommended: nothing secret is
-  written anywhere.
-- **(b) Hand the stream over in a temporary file.** The child writes the stream to a mode-0600 temporary file, and
-  the parent returns an open file object the caller owns, at the cost of the secret at rest on disk. Any other
-  value that cannot cross the pipe still gets the declared error of (a).
-
-The Keychain, whose query can wait on an authorization prompt:
-
-- **(a) Query without interactive UI.** The native read asks the Keychain not to prompt. A locked or
-  authorization-gated item then returns at once and is reported UNKNOWN, with the next action
-  `KEYCHAIN_LOCKED_NEXT_ACTION`. No lookup then shows a Keychain prompt; an item that needs one is reported UNKNOWN
-  with `KEYCHAIN_LOCKED_NEXT_ACTION` and is never cached by `GAL-secure-cache`. This changes the native bridge and
-  raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain existence feature builds on version 2.
-  Recommended: a parallel lookup never waits on a dialog.
-- **(b) Treat the Keychain as non-cooperative.** `KeyringProvider` does not subclass `DeadlineAwareGemProvider`
-  and is `UNSUPPORTED`. It goes through the chosen non-cooperative path, and its prompt can still appear until the
-  deadline ends it.
-
-The read of a declared dotenv file on an unresponsive mount, which cannot be bounded in a thread:
-
-- **(a) Accept a weaker contract for that named case.** `SUPPORTED` means bounded, except a read of a declared
-  file on an unresponsive mount, which the lookup waits for. Neither the return part nor the execution part of the
-  contract holds for that read.
-- **(b) Read a file on another device in a bounded child.** A declared dotenv file whose device, stored when the
-  instance is created, differs from the home directory's is checked and read through `run_in_child` under a
-  finite deadline, as Built-in deadline handling states. The parent makes no system call on that path during a
-  lookup. The return part of the contract always holds: the lookup returns within the deadline plus grace. The
-  execution part holds except for a killed child that the operating system still holds in an uninterruptible
-  wait: the lookup reports it with `CHILD_LINGERING_REASON`, `multiprocessing` reaps it once it exits, and
-  interpreter exit waits for it. A receiver thread that a process forked by the provider keeps waiting is
-  reported with `CHILD_RECEIVER_REASON`. A file on the home directory's own device is read in process, so the home
-  directory is taken as responsive. Recommended: no lookup waits on an unresponsive mount, and a held child is
-  reported rather than hidden.
-
-## Acceptance cases
+### Acceptance cases
 
 Each case extends an existing suite; there is no new test framework. Every timing case patches
 `LOOKUP_TIMEOUT_SECONDS` to 0.2 and imports `LOOKUP_SHUTDOWN_GRACE_SECONDS`, so the bound under test is
@@ -996,21 +1106,3 @@ In `tests/contract/test_provider_contract.py`:
   - Expected: in the first case, `find_gem_within` raises `ProviderLookupError` with `TIMEOUT_REASON` within the
     bound, and the child has exited; in the second, `run_in_child` is never called and the result equals that of
     `find_gem`. In the first case, the parent makes no system call on the declared path during the lookup.
-
-## Dependencies on other features
-
-- **Requires:**
-  - `GAL-plugin`, for `Capability`, `CapabilityObservation`, `EvidenceSource.PROVIDER_CLASS`, and
-    `constants/capability.py`;
-  - `GAL-settings`, which introduces `constants/lookup.py` with `LOOKUP_TIMEOUT_SECONDS`,
-    `gems/keychain_constants.py`, `gems/kubernetes_constants.py`, and `gems/onepassword_constants.py`;
-  - `GAL-scope` (plan 4.1) and `GAL-chooser` (plan 4.3), whose `target` and `choice` parameters `_inspect_within` and
-    `_resolve_within` take;
-  - `GAL-discovery` under non-cooperative option (b) or dotenv option (b), for
-    `GemProvider.create(record, types=(provider_type,))`.
-- **Required by:** `GAL-secure-cache`, which uses `Deadline`, its injected clock, `_resolve_within`,
-  `get_gem_within`, and `TIMEOUT_NEXT_ACTION`.
-- **Overlaps:** Keychain option (a) changes the native bridge, as the proposed Keychain existence feature does.
-  Under Keychain option (a), this feature raises `KEYCHAIN_ABI_VERSION` from 1 to 2; the proposed Keychain
-  existence feature builds on version 2.
-- **Answers:** the overview's earlier `GAL-parallel` entry, which bounded only the caller's wait.
