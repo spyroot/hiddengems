@@ -1,56 +1,26 @@
-# GAL-secure-cache: encrypted value cache in front of provider reads
+# NOT_IMPLEMENTED: GAL-secure-cache — encrypted value cache in front of provider reads
 
-Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
-[Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
-[provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
-[Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate) and its exception rules.
-The cache surface below is the owner's; this document gives every part its exact signature, behavior, owner,
-caller, and acceptance test.
+- grounding: GROUNDED
+- implementation: NOT_IMPLEMENTED
+- verification: UNVERIFIED
+- planningStage: PROPOSED
 
-Revision 5 answers the review of revision 4. Destroying the live key makes the live records unreadable through
-the filesystem, and a backup or snapshot that holds both a key file and its records stays decryptable (GSC1).
-`selection`, `canonical()`, `routing_revision`, `CacheRecord.metadata`, and `JsonGemCodec` use the
-type-preserving encoding of `GAL-chooser`, and a request that cannot be encoded bypasses the cache (GSC2). A
-`refresh=True` whose reload fails leaves the record in place (GSC3). A hit checks its epoch and key again after
-the identity wait and after decoding, and the linearization of a hit and `invalidate()` is stated, with cases
-S24 and S25 (GSC4). `AsyncSecretCache` runs every blocking call on an executor it owns, and `close()` shuts that
-executor down (GSC6). Case S23 checks that one epoch uses one key pair for every identity (GSC8). `selection`
-holds `choice` when it is given and the preference when it is not, and `routing_revision` no longer covers
-preferences, so saving a choice does not change the request that made it (GSC10).
+## Authority
 
-Revision 4 applies the second round of decisions. With `remember=True` and a `choice`, `dig_gem` saves the choice
-after `get_or_load` returns, on a hit as on a miss. Providers in P states each applicable contract as `C`
-restricted to the classes the provider subclasses. Cases S20 and S21 cover `HiddenGems.invalidate` and the profile
-builders, and the async gate row names the cases that run on `AsyncSecretCache`. Every hold of the generation
-fence has a deadline and a stated result when it expires. The `selection` keys are named constants, and a
-`UserWarning` filter still catches `SecretCacheWarning`. The Keychain prompts once per period only under Keychain
-option (b) of `GAL-parallel`. `canonical_json` comes from `GAL-chooser`, correcting revision 3.
+This revises the proposal merged in [PR #6](https://github.com/spyroot/hiddengems/pull/6).
+The [delivery map](DELIVERY.md#authority) identifies the exact source snapshot, Standards principles and
+accepted owner decisions. The original [design](../README.md) and [routing overview](../provider-routing-design.md)
+remain unchanged. B stays 4438234; approved deltas do not redefine it. The owner requested this planning
+revision on 2026-10-14; it does not authorize feature implementation.
 
-Revision 3 aligns this proposal with the other feature proposals. It is delivered at plan 6.5, after
-`GAL-masked-value`, and `dig_gem` has its final signature. `selection` adds `target` and `choice`, and
-`routing_revision` adds `GemConfig.targets`, `GemConfig.routes`, and `GemConfig.discovery_local`. The loader
-calls `_resolve_within` and reads by `deadline_capability`, so the cache wait, the resolution, and the read
-share one deadline. `Deadline` is imported from `GAL-parallel`, not declared here. `canonical_json` comes from
-`GAL-remember`, and `atomic_file.rewrite_file` from `GAL-chooser`. The gate lists the profile builders, both
-exception classes, and one row per provider. `SecretCacheWarning` has a constructor and a message constant,
-both exceptions have their register entries, and the key bits, `NO_EPOCH`, and the codec tags are named
-constants. A new alternative covers what one authentication unlocks, `AbstractAsyncSecretCache` is marked an
-owner-mandated exception, and S15 uses a deadline-aware writer. `GAL-encrypted-store` now requires this feature.
+## Consumer
 
-Revision 2 adds three rules from the owner, and corrects one definition:
+A caller supplies a cache to `HiddenGems(cache=...)` and receives `dig_gem`'s value-list result. The caller
+owns selection, freshness policy and cache closure. The async cache still needs an identified public consumer.
 
-- **Per-call refresh.** `get_or_load` and `dig_gem` take `refresh: bool = False`. A caller that expects the
-  value to change outside the library passes `refresh=True`, on every call if it wants. That skips the hit,
-  reads the provider, and replaces the cached record.
-- **The caller's choice holds for the period.** A record keeps the reference that served it. The next
-  identical request gets that reference's cached value until the period ends, without resolving again.
-- **A new duplicate does not invalidate.** If the same gem appears in another provider during the period,
-  the cached choice stands. See [Choice within a period](#choice-within-a-period).
-- **Correction:** `routing_revision` covered the detected records in revision 1. A newly detected duplicate
-  would then have changed every request and ended the cached choice. It now covers only the explicit routing
-  configuration.
+## Motivation
 
-## Purpose and observable capability
+### Purpose and observable capability
 
 A gem read 200 times in one period costs one provider lookup and one value read, so it prompts for a 1Password
 unlock once, not 200 times. The Keychain prompts once only under Keychain option (b) of `GAL-parallel`; under
@@ -72,7 +42,25 @@ and is never cached.
   - nothing caches a value. "No caching of gem values" is a non-goal, and this feature relaxes it only when the
     caller passes a cache.
 
-## Flow
+## Diagram
+
+```mermaid
+flowchart LR
+  Caller -->|selection and refresh| HiddenGems
+  HiddenGems -->|CacheRequest and loader| Cache["AbstractSecretCache"]
+  Cache -->|acquire, authenticate, decode| Parts["Injected collaborators"]
+  Parts -->|fresh decoded hit| Cache
+  Cache -->|miss: shared Deadline| Loader["Router-owned resolve/read callback"]
+  Loader -->|chosen reference| Provider["Factory-created instance"]
+  Provider -->|values or failure| Loader
+  Loader -->|ResolvedGem for checked publication| Cache
+  Cache -->|isolated value list| HiddenGems
+  HiddenGems -->|result or error| Caller
+```
+
+Data/control edges are labeled above. The existing layout below identifies module ownership.
+
+### Flow
 
 ```text
 HiddenGems.dig_gem
@@ -86,7 +74,47 @@ HiddenGems.dig_gem
 `inspect_gem` and `resolve_gem` never use the cache. A failed lookup is never cached: `AmbiguousGemError`,
 `IncompleteGemLookupError`, `StaleGemPreferenceError`, and `GemNotFoundError` reach the caller as today.
 
-## Choice within a period
+### Layout
+
+```text
+~ pyproject.toml                                 extra cache = ["cryptography>=50.0"]
++ src/hiddengems/secret_cache.py                 records, enums, abstract classes, SecretCache, AsyncSecretCache,
+                                                 PassThroughSecretCache, adapters, CacheIntegrityError,
+                                                 SecretCacheWarning
++ src/hiddengems/secret_cache_profiles.py        the four profile builders
++ src/hiddengems/constants/cache.py              the constants above
+~ src/hiddengems/hidden_gems.py                  cache=, dig_gem, hide_gem, invalidate step
++ tests/contract/test_secret_cache_contract.py   the blocking suite
+```
+
+## Implementation Plan
+
+NOT_IMPLEMENTED: GAL-secure-cache
+
+Main `4641927` resolves and reads on every `dig_gem`. `secret_cache.py`, profiles, encrypted persistence and
+per-call refresh are absent. The merged proposal defines additions, not implementation evidence.
+
+### Current decisions and conflicts
+
+**CACHE-01:** select key placement, an actual async consumer or deferral, timeout translation, hit
+linearization, failed-refresh behavior, write invalidation scope, and what authentication unlocks. The owner
+described refresh as invalidation, while the proposal retains the old entry after a failed refresh. Decide
+whether the next non-refresh call may reuse that entry; neither interpretation is silently selected here.
+
+Opt-in caching, selection for a fixed period, preference-sensitive identity and explicit refresh are settled.
+Automatic detection of external secret changes, including 1Password updates, is not required or a defect.
+The six injected collaborators own cipher, codec, records, keys, lifetime and coordination. Algorithms come
+from `cryptography` through the proposed `cache` extra. Historical version observations below are not current
+availability proof; verify bounds when implementing. This plan installs no dependency.
+
+Reuse one key pair within an active epoch; rotate between epochs and use fresh nonces per seal. Keep
+remembered detection separate from values. Honor the caller's root exactly. Disk and async profiles remain
+conditional on their chosen contracts. The cache never selects or constructs providers.
+
+Detailed alternatives below retain the merged proposal as review evidence. Identified conflicts block the
+affected implementation; they are not permission to choose or rewrite its contract.
+
+### Choice within a period
 
 The rule is generic: it holds for any providers `p₁` and `p₂`, built-in or third-party.
 
@@ -112,7 +140,7 @@ t₄  dig_gem("x", refresh=True)      R(x) = {p₁, p₂}    resolves again → 
 - **Example names:** with `p₁` the 1Password instance and `p₂` a dotenv file, x keeps coming from 1Password
   until one of the events above.
 
-## Scope
+### Scope
 
 In scope:
 
@@ -130,7 +158,7 @@ Out of scope:
   reserves for non-secret metadata, and this feature shares no storage with `GAL-remember`;
 - deleting an expired key while no process runs. See [Expiry and deletion](#expiry-and-deletion).
 
-## Libraries
+### Libraries
 
 No cryptographic code is written here. Every primitive comes from a library:
 
@@ -153,7 +181,7 @@ Both AEAD classes are in `cryptography.hazmat.primitives.ciphers.aead`.
 - **Packaging:** `cryptography>=50.0` in a new extra `cache`, imported lazily inside the two adapters. Without
   the extra, building either adapter raises `ModuleNotFoundError` naming `hiddengems[cache]`.
 
-## Records
+### Records
 
 In `src/hiddengems/secret_cache.py`, all frozen dataclasses:
 
@@ -214,7 +242,7 @@ Type aliases: `GemLoader = Callable[[Deadline], ResolvedGem]` and
 
 Imported, not declared here: `Deadline` from `hiddengems.abstraction` (`GAL-parallel`).
 
-## Lifetime invariant
+### Lifetime invariant
 
 For an epoch `e` created at `t_e`, its deadline is `d_e := t_e + TTL`. A record is usable at time `t` if and
 only if all four hold:
@@ -243,7 +271,7 @@ usable(record, t)  ⟺  t < d_e
 A load that started before step 1 can finish later. Its commit then finds the generation retired and publishes
 nothing. Its own caller still receives the values it loaded, but no other request receives them as a hit.
 
-### Expiry and deletion
+#### Expiry and deletion
 
 Enforcement and deletion are separate guarantees:
 
@@ -258,12 +286,12 @@ Enforcement and deletion are separate guarantees:
   survive. The guarantee is that the key is no longer readable through the filesystem; it is not forensic
   erasure.
 
-## Public cache contract
+### Public cache contract
 
 Both cache contracts are abstract base classes, using `@abstractmethod` the way `AbstractGemProvider` does. A
 class that leaves an operation unimplemented cannot be instantiated.
 
-### `AbstractSecretCache`
+#### `AbstractSecretCache`
 
 | Operation | Signature | Behavior |
 | --- | --- | --- |
@@ -322,7 +350,7 @@ the generation fence, so a hit whose check runs after that `revoke` is a miss.
 The orchestration contains no cipher name, no file path, and no provider name. It sees only the six injected
 dependencies.
 
-### `AbstractAsyncSecretCache`
+#### `AbstractAsyncSecretCache`
 
 The same four operations as `async def`, with `loader: AsyncGemLoader` and the same `refresh` keyword.
 `AsyncSecretCache` behaves as above, and also:
@@ -343,17 +371,17 @@ The same four operations as `async def`, with `loader: AsyncGemLoader` and the s
 **Limit.** A storage call on a cache root that sits on an unresponsive network mount blocks inside the
 operating system, and `close()` waits for it.
 
-### `PassThroughSecretCache`
+#### `PassThroughSecretCache`
 
 `get_or_load` returns `loader(deadline).values`; `invalidate`, `expire`, and `close` do nothing.
 `PASS_THROUGH_CACHE` is its module-level instance and the default of `HiddenGems(cache=...)`.
 
-## Replaceable dependencies
+### Replaceable dependencies
 
 `SecretCache(cipher, codec, store, key_store, lifetime, coordinator)` receives all six through its constructor.
 `AsyncSecretCache` takes the same six.
 
-### `AbstractCacheCipher`
+#### `AbstractCacheCipher`
 
 - `cipher_id: ClassVar[CipherId]`.
 - `generate_key(self) -> bytearray`.
@@ -364,7 +392,7 @@ operating system, and `close()` waits for it.
 - Adapters: `AesGcmCipher` (`AESGCM`, 12-byte nonce, 32-byte key) and `ChaCha20Poly1305Cipher`
   (`ChaCha20Poly1305`, 12-byte nonce, 32-byte key).
 
-### `AbstractGemCodec`
+#### `AbstractGemCodec`
 
 - `codec_id: ClassVar[CodecId]`.
 - `encode(self, values: list[Gem]) -> bytes`. Raises `TypeError` for a value it does not support.
@@ -376,7 +404,7 @@ operating system, and `close()` waits for it.
   no type lost. An `IO` value raises `TypeError`, and the values are returned without storing, as in step 6 of
   `get_or_load`.
 
-### `AbstractCacheStore`
+#### `AbstractCacheStore`
 
 - `read(self, identity: str, epoch: CacheEpoch) -> CacheRecord | CacheMiss`.
 - `commit_if_current(self, record: CacheRecord, *, current: CacheEpoch) -> CommitState`.
@@ -392,7 +420,7 @@ operating system, and `close()` waits for it.
   - `FileCacheStore(root: Path)`: one directory per generation and one file per record, as listed under
     [Disk layout](#disk-layout).
 
-### `AbstractCacheKeyStore`
+#### `AbstractCacheKeyStore`
 
 - `create(self, epoch: CacheEpoch, keys: EpochKeys) -> AcquiredKey`. Called inside the generation fence. It
   stores the keys as the current epoch, unless a valid epoch is already current. In that case it returns that
@@ -407,7 +435,7 @@ operating system, and `close()` waits for it.
   - `MemoryCacheKeyStore()`: the keys live only in this process;
   - `FileCacheKeyStore(root: Path)`: one file per key, used only if key-placement option (a) is approved.
 
-### `AbstractCacheLifetime`
+#### `AbstractCacheLifetime`
 
 - `new_epoch(self, key_id: str) -> CacheEpoch`.
 - `is_valid(self, epoch: CacheEpoch) -> bool`: `created_at <= now < expires_at`.
@@ -415,7 +443,7 @@ operating system, and `close()` waits for it.
   `CACHE_MIN_PERIOD_SECONDS` and `CACHE_PERIOD_SECONDS`, or the constructor raises `ValueError`.
   Configuration may shorten the period and never lengthen it.
 
-### `AbstractCacheCoordinator`
+#### `AbstractCacheCoordinator`
 
 - `hold(self, identity: str, deadline: Deadline) -> AbstractContextManager[HoldState]`. It waits until it holds
   `identity` or `deadline` passes. On leaving the context, the hold is released, even after an exception.
@@ -428,7 +456,7 @@ operating system, and `close()` waits for it.
     release it unlinks the file while still holding the lock, then unlocks. So lock files never accumulate,
     and a waiter that locked an unlinked file retries on the new one.
 
-## Profiles
+### Profiles
 
 A profile is a declared, supported combination. The contract suite runs on every one of them.
 
@@ -451,7 +479,7 @@ A profile is a declared, supported combination. The contract suite runs on every
 - On Windows, `disk_secret_cache` raises `ValueError` with `CACHE_DISK_UNSUPPORTED`, because the ownership and
   mode checks below are POSIX.
 
-## Disk layout
+### Disk layout
 
 ```text
 ~/.hiddengem/                          0700   root = Path.home() / CACHE_DIR_NAME
@@ -477,7 +505,7 @@ A profile is a declared, supported combination. The contract suite runs on every
 - **Lock files** exist only while held, by the unlink rule of `FileCacheCoordinator`.
 - **Separate from remembered detection:** nothing here is written to `~/.gem_provider.json`.
 
-## `HiddenGems` changes
+### `HiddenGems` changes
 
 - **`__init__(..., cache: AbstractSecretCache = PASS_THROUGH_CACHE)`,** a keyword-only parameter after
   `refresh` from `GAL-remember`. It stores `cache` and computes `self._routing_revision` as defined under
@@ -513,9 +541,192 @@ A profile is a declared, supported combination. The contract suite runs on every
   `TimeoutError` it collects with its other step errors, and recomputes `_routing_revision` after detecting again.
 - `HiddenGems` never closes a cache it was given. The caller that built it owns `close()`.
 
-## Abstraction-extension gate
+### Constants
 
-### 1. Extensions
+`src/hiddengems/constants/cache.py`:
+
+- `CACHE_DIR_NAME: Final[str] = ".hiddengem"`, `CACHE_DIR_MODE: Final[int] = 0o700`, and
+  `CACHE_FILE_MODE: Final[int] = 0o600`, as the overview already lists;
+- `CACHE_ENTRIES_DIR_NAME: Final[str] = "entries"`, `CACHE_KEYS_DIR_NAME: Final[str] = "keys"`, and
+  `CACHE_LOCKS_DIR_NAME: Final[str] = "locks"`;
+- `CACHE_RECORD_SUFFIX: Final[str] = ".record"`, `CACHE_KEY_SUFFIX: Final[str] = ".key"`,
+  and `CACHE_LOCK_SUFFIX: Final[str] = ".lock"`;
+- `CACHE_FENCE_IDENTITY: Final[str] = "fence"`;
+- `CACHE_PERIOD_SECONDS: Final[int] = 86_400` and `CACHE_MIN_PERIOD_SECONDS: Final[int] = 60`;
+- `CACHE_ID_BYTES: Final[int] = 16`, `CACHE_INDEX_KEY_BYTES: Final[int] = 32`, and `CACHE_KEY_BYTES: Final[int] =
+  32`;
+- `CACHE_KEY_BITS: Final[int] = CACHE_KEY_BYTES * BITS_PER_BYTE` and `BITS_PER_BYTE: Final[int] = 8`. The AES
+  adapter calls `generate_key(bit_length=CACHE_KEY_BITS)`;
+- `AES_GCM_NONCE_BYTES: Final[int] = 12` and `CHACHA20_POLY1305_NONCE_BYTES: Final[int] = 12`, used only by
+  their adapters, because the nonce length belongs to the adapter;
+- `AEAD_TAG_BYTES: Final[int] = 16`;
+- `NO_EPOCH_ID: Final[str] = ""` and `EPOCH_ORIGIN: Final[datetime] = datetime.min.replace(tzinfo=timezone.utc)`.
+  `secret_cache.py` builds `NO_EPOCH` from them, as listed under [Records](#records);
+- `SELECTION_PROVIDER_KEY: Final[str] = "provider"`, `SELECTION_TARGET_KEY: Final[str] = "target"`,
+  `SELECTION_CRITERIA_KEY: Final[str] = "criteria"`, `SELECTION_PREFERENCE_KEY: Final[str] = "preference"`, and
+  `SELECTION_CHOICE_KEY: Final[str] = "choice"`, the keys of `CacheRequest.selection`, which holds
+  `SELECTION_CHOICE_KEY` when `choice` is given and `SELECTION_PREFERENCE_KEY` when it is not;
+- `CACHE_RECORD_FORMAT: Final[int] = 1` and `CACHE_KEY_FORMAT: Final[int] = 1`;
+- `CACHE_MAX_RECORDS: Final[int] = 4096` and `CACHE_MAX_VALUE_BYTES: Final[int] = 1_048_576`;
+- `CACHE_HOLD_POLL_SECONDS: Final[float] = 0.01`;
+- `CACHE_ASYNC_WORKERS: Final[int] = 4` and `CACHE_THREAD_PREFIX: Final[str] = "hiddengems-cache"`, the worker
+  count and the thread-name prefix of the executor that `AsyncSecretCache` owns;
+- `CACHE_ISSUE_SOURCE: Final[str] = "secret-cache"`;
+- `CACHE_WAIT_TIMEOUT_REASON: Final[str] = "Waited for another read of the same gem until the time limit"`;
+- `CACHE_DISK_UNSUPPORTED: Final[str] = "The disk cache needs POSIX ownership and modes"`;
+- `SECRET_CACHE_WARNING: Final[str] = "Secret cache bypassed: {path} failed the {check} check"`;
+- `CACHE_EXTRA_MISSING: Final[str] = "Install hiddengems[cache] to use the secret cache"`.
+
+The codec's keys and tags are the `TYPED_*` constants of `GAL-chooser` in `constants/config.py`; this module
+declares none.
+
+### Alternatives for the owner's decision
+
+- **Key placement,** the point the overview left open:
+  - (a) `FileCacheKeyStore(root / "keys")`, beside the records, protected by file modes as `~/.ssh` is.
+    Recommended: a cache shared across processes needs a shared key, and destroying the live key makes the live
+    records unreadable through the filesystem. A backup or snapshot that holds both a key file and its records
+    stays decryptable, so the claim covers only copies whose key copy is unavailable.
+  - (b) `MemoryCacheKeyStore` only. Keys never touch the disk, so the disk profile is not offered; only the
+    memory profile exists, and every process prompts once.
+  - (c) a key held in an OS keystore item, such as the Keychain. A separate feature: reading that item can
+    itself prompt.
+- **`AbstractAsyncSecretCache`:**
+  - **CACHE-01 conflict:** option (a) below claims an owner-mandated exception, but identifies no
+    concrete consumer. The claim remains disputed; neither it nor a test case selects this option.
+    The owner must identify the public caller/interface or explicitly choose deferral.
+  - (a) deliver it now as public API, with `AsyncSecretCache` and its profiles. Its caller is the library's
+    caller, because `HiddenGems` has no async API. Recommended: the blocking suite includes
+    `test_async_contract_does_not_block_loop`. This is an owner-mandated exception to the no-consumer rule of
+    `software-design.md`: the owner's blocking suite includes `test_async_contract_does_not_block_loop`.
+  - (b) declare it and lock its implementation until an async `HiddenGems` API exists to call it.
+- **A timed-out wait for the same identity or for the generation fence in `get_or_load`:**
+  - (a) `IncompleteGemLookupError` at `dig_gem`, as above. Recommended: callers already handle it, and the set
+    of errors `dig_gem` raises does not grow.
+  - (b) let `TimeoutError` reach the caller.
+- **A hit that overlaps `invalidate()`:**
+  - (a) a hit's linearization point is its check after decoding, and the linearization point of `invalidate` is
+    its `revoke` under the generation fence, as above. Recommended: hits for different identities run at the
+    same time, and a hit that passed its check returns even if `invalidate()` starts afterwards.
+  - (b) hits hold the generation fence, serializing them with `invalidate` and with each other. Not
+    recommended: one hit at a time.
+- **A refresh that fails:**
+  - (a) leave the existing record of that identity in place until the period ends, `invalidate()`, or a later
+    successful refresh. Recommended: the store contract stays at the owner's three operations, and the record
+    was valid for the caller's period.
+  - (b) add `discard(identity, epoch)` to `AbstractCacheStore`, and drop the record before loading.
+- **A write through `hide_gem`:**
+  - (a) invalidate the whole cache. Recommended: writes are rare, and the contract needs no operation to find
+    records by name, which the HMAC identity hides on purpose.
+  - (b) add an operation that drops one name's records.
+- **What one authentication unlocks:**
+  - (a) one request identity: one provider read fills one record. Recommended: it is what `get_or_load` does.
+  - (b) one provider.
+  - (c) every cached gem.
+
+### Proposal history
+
+Status: proposal, revision 5. Not approved for implementation. The owner decides the choices in
+[Alternatives](#alternatives-for-the-owners-decision). The overview of all features is
+[provider-routing-design.md](../provider-routing-design.md). This proposal is written to its
+[Abstraction-extension gate](../provider-routing-design.md#abstraction-extension-gate) and its exception rules.
+The cache surface below is the owner's; this document gives every part its exact signature, behavior, owner,
+caller, and acceptance test.
+
+Revision 5 answers the review of revision 4. Destroying the live key makes the live records unreadable through
+the filesystem, and a backup or snapshot that holds both a key file and its records stays decryptable (GSC1).
+`selection`, `canonical()`, `routing_revision`, `CacheRecord.metadata`, and `JsonGemCodec` use the
+type-preserving encoding of `GAL-chooser`, and a request that cannot be encoded bypasses the cache (GSC2). A
+`refresh=True` whose reload fails leaves the record in place (GSC3). A hit checks its epoch and key again after
+the identity wait and after decoding, and the linearization of a hit and `invalidate()` is stated, with cases
+S24 and S25 (GSC4). `AsyncSecretCache` runs every blocking call on an executor it owns, and `close()` shuts that
+executor down (GSC6). Case S23 checks that one epoch uses one key pair for every identity (GSC8). `selection`
+holds `choice` when it is given and the preference when it is not, and `routing_revision` no longer covers
+preferences, so saving a choice does not change the request that made it (GSC10).
+
+Revision 4 applies the second round of decisions. With `remember=True` and a `choice`, `dig_gem` saves the choice
+after `get_or_load` returns, on a hit as on a miss. Providers in P states each applicable contract as `C`
+restricted to the classes the provider subclasses. Cases S20 and S21 cover `HiddenGems.invalidate` and the profile
+builders, and the async gate row names the cases that run on `AsyncSecretCache`. Every hold of the generation
+fence has a deadline and a stated result when it expires. The `selection` keys are named constants, and a
+`UserWarning` filter still catches `SecretCacheWarning`. The Keychain prompts once per period only under Keychain
+option (b) of `GAL-parallel`. `canonical_json` comes from `GAL-chooser`, correcting revision 3.
+
+Revision 3 aligns this proposal with the other feature proposals. It is delivered at plan 6.5, after
+`GAL-masked-value`, and `dig_gem` has its final signature. `selection` adds `target` and `choice`, and
+`routing_revision` adds `GemConfig.targets`, `GemConfig.routes`, and `GemConfig.discovery_local`. The loader
+calls `_resolve_within` and reads by `deadline_capability`, so the cache wait, the resolution, and the read
+share one deadline. `Deadline` is imported from `GAL-parallel`, not declared here. `canonical_json` comes from
+`GAL-remember`, and `atomic_file.rewrite_file` from `GAL-chooser`. The gate lists the profile builders, both
+exception classes, and one row per provider. `SecretCacheWarning` has a constructor and a message constant,
+both exceptions have their register entries, and the key bits, `NO_EPOCH`, and the codec tags are named
+constants. A new alternative covers what one authentication unlocks, `AbstractAsyncSecretCache` is marked an
+owner-mandated exception, and S15 uses a deadline-aware writer. `GAL-encrypted-store` now requires this feature.
+
+Revision 2 adds three rules from the owner, and corrects one definition:
+
+- **Per-call refresh.** `get_or_load` and `dig_gem` take `refresh: bool = False`. A caller that expects the
+  value to change outside the library passes `refresh=True`, on every call if it wants. That skips the hit,
+  reads the provider, and replaces the cached record.
+- **The caller's choice holds for the period.** A record keeps the reference that served it. The next
+  identical request gets that reference's cached value until the period ends, without resolving again.
+- **A new duplicate does not invalidate.** If the same gem appears in another provider during the period,
+  the cached choice stands. See [Choice within a period](#choice-within-a-period).
+- **Correction:** `routing_revision` covered the detected records in revision 1. A newly detected duplicate
+  would then have changed every request and ended the cached choice. It now covers only the explicit routing
+  configuration.
+
+## PR Order
+
+Planning PR I-secure-cache, wave W6, is one bounded delivery, not a GitHub PR number.
+
+Parallel supplies Deadline and bounded reads; remember supplies router invalidation; chooser supplies
+identity encoding, preferences and atomic writes; masked-value supplies masking composition. Deliver the
+selected usable profiles with their contracts/tests, not unused abstract classes first. Encrypted-store
+later reuses the cipher and key-store contracts.
+
+The [cross-GAL map](DELIVERY.md#pr-order) covers all 38 IDs. The details below name the concrete prerequisites.
+
+### Dependencies on other features
+
+- **Delivery:** plan 6.5, after `GAL-masked-value` (6.4).
+- **Blocked by:**
+  - `GAL-parallel`, for `Deadline` with its injected clock, `_resolve_within`, `deadline_capability`, and
+    `get_gem_within`;
+  - `GAL-remember`, for `HiddenGems.invalidate`;
+  - `GAL-chooser`, for `canonical_json.py` with its type-preserving encoding and the `TYPED_*` constants,
+    `atomic_file.py`, `choice`, and `save_preference`;
+  - `GAL-masked-value`, for `masked`, the last `dig_gem` parameter before `refresh`;
+  - `GAL-plugin`, for the `tests/contract/` location;
+  - `GAL-settings`, for `LOOKUP_TIMEOUT_SECONDS`.
+- **Required by:** `GAL-encrypted-store`, which reuses `AbstractCacheCipher` and `AbstractCacheKeyStore`.
+- **Relates to:**
+  - the proposed Keychain existence check, which removes the second Keychain read even without a cache.
+
+## Gates
+
+### Requirement traceability
+
+These requirements derive from Authority and the original scope below. They belong to GAL-secure-cache,
+I-secure-cache / W6; PR Order names their dependencies. Implementation is classified above and verification
+is UNVERIFIED. Named cases below are proposed enforcement, not recorded runs.
+
+| Requirement | Deliverable / owner | Acceptance / remaining gap |
+| --- | --- | --- |
+| GSC-READ | Router/cache | S2-S5, S14, S17-S19, S22; CACHE-01 |
+| GSC-KEY | Lifetime/key store | S6-S8, S13, S23-S25 |
+| GSC-CONC | Coordinator/async owner | S9-S11; actual async consumer |
+| GSC-DISK | Store/profiles | S12, S16, S21; key placement |
+| GSC-INVALIDATE | Write/router lifecycle | S7, S15, S20; failed refresh |
+
+Acceptance covers types, ownership, wiring and all applicable providers under C = B plus approved delta.
+Baseline expectations change only through explicit approval. Use the existing
+[validation surface](DELIVERY.md#gates); record the candidate SHA and actual results. No feature
+implementation or new validation mechanism is part of this planning revision.
+
+### Abstraction-extension gate
+
+#### 1. Extensions
 
 Every new name is in `src/hiddengems/secret_cache.py`, except the profile builders, in
 `secret_cache_profiles.py`, and the constants, in `constants/cache.py`.
@@ -524,7 +735,7 @@ Every new name is in `src/hiddengems/secret_cache.py`, except the profile builde
 | --- | --- | --- | --- | --- |
 | records and enums above | MUST ADD | `secret_cache.py` | `SecretCache`, `HiddenGems.dig_gem` | S2, S3, S5, S8 |
 | `AbstractSecretCache` | MUST ADD | `SecretCache`, `PassThroughSecretCache` | `HiddenGems.dig_gem` | S1-S10, S12-S25 |
-| `AbstractAsyncSecretCache` | MUST ADD | `AsyncSecretCache` | the library's caller | async S1, S6-S13, S23-S25 |
+| `AbstractAsyncSecretCache` | CONFLICT: CACHE-01; retained proposal says MUST ADD | `AsyncSecretCache` | Unspecified: "the library's caller" | async S1, S6-S13, S23-S25 |
 | `AbstractCacheCipher` | MUST ADD | `AesGcmCipher`, `ChaCha20Poly1305Cipher` | `SecretCache` | S1, S8, S13, S23 |
 | `AbstractGemCodec` | MUST ADD | `JsonGemCodec` | `SecretCache` | S1, S5 |
 | `AbstractCacheStore` | MUST ADD | `MemoryCacheStore`, `FileCacheStore` | `SecretCache` | S1, S7, S12 |
@@ -542,13 +753,13 @@ In the `AbstractAsyncSecretCache` row, "async S1, S6-S13, S23-S25" means that th
 
 The signature and behavior of each are in the sections above.
 
-### 2. What each extension extends
+#### 2. What each extension extends
 
 None extends `AbstractGemProvider`, and none replaces it. The eight new abstract classes describe a cache, not a
 provider, so they are a separate contract and not a parallel provider contract. `B`, the factory, and the
 providers are unchanged.
 
-### 3. Providers in P
+#### 3. Providers in P
 
 - **`OnePasswordProvider`.** Applicable contract `C`: `AbstractGemProvider`, `DeadlineAwareGemProvider`. How it
   satisfies it: unchanged by this feature; reached only through `_resolve_within` and the read inside the loader.
@@ -566,15 +777,15 @@ providers are unchanged.
 adds nothing to it, and none of the four is edited. Under `GAL-plugin` option one, `WritableGemProvider` does not
 exist, and no provider subclasses it.
 
-### 4. Baseline tests whose expectations change
+#### 4. Baseline tests whose expectations change
 
 None. The default `PASS_THROUGH_CACHE` leaves every read going to the provider, and case S14 checks that.
 
-### 5. Baseline
+#### 5. Baseline
 
 The baseline stays commit `4438234`. This proposal does not redefine `B`.
 
-## Exceptions
+### Exceptions
 
 Two new classes, each needed because a caller must tell it apart from every existing class. This feature's
 pull request adds both to `EXPECTED_EXCEPTIONS` in `test_exception_classes_match_the_register` of
@@ -616,100 +827,7 @@ Reused without a new class:
 Messages and attributes never contain a gem value or key material. Gem names appear only inside the encrypted
 payload and the authenticated metadata.
 
-## Constants
-
-`src/hiddengems/constants/cache.py`:
-
-- `CACHE_DIR_NAME: Final[str] = ".hiddengem"`, `CACHE_DIR_MODE: Final[int] = 0o700`, and
-  `CACHE_FILE_MODE: Final[int] = 0o600`, as the overview already lists;
-- `CACHE_ENTRIES_DIR_NAME: Final[str] = "entries"`, `CACHE_KEYS_DIR_NAME: Final[str] = "keys"`, and
-  `CACHE_LOCKS_DIR_NAME: Final[str] = "locks"`;
-- `CACHE_RECORD_SUFFIX: Final[str] = ".record"`, `CACHE_KEY_SUFFIX: Final[str] = ".key"`,
-  and `CACHE_LOCK_SUFFIX: Final[str] = ".lock"`;
-- `CACHE_FENCE_IDENTITY: Final[str] = "fence"`;
-- `CACHE_PERIOD_SECONDS: Final[int] = 86_400` and `CACHE_MIN_PERIOD_SECONDS: Final[int] = 60`;
-- `CACHE_ID_BYTES: Final[int] = 16`, `CACHE_INDEX_KEY_BYTES: Final[int] = 32`, and `CACHE_KEY_BYTES: Final[int] =
-  32`;
-- `CACHE_KEY_BITS: Final[int] = CACHE_KEY_BYTES * BITS_PER_BYTE` and `BITS_PER_BYTE: Final[int] = 8`. The AES
-  adapter calls `generate_key(bit_length=CACHE_KEY_BITS)`;
-- `AES_GCM_NONCE_BYTES: Final[int] = 12` and `CHACHA20_POLY1305_NONCE_BYTES: Final[int] = 12`, used only by
-  their adapters, because the nonce length belongs to the adapter;
-- `AEAD_TAG_BYTES: Final[int] = 16`;
-- `NO_EPOCH_ID: Final[str] = ""` and `EPOCH_ORIGIN: Final[datetime] = datetime.min.replace(tzinfo=timezone.utc)`.
-  `secret_cache.py` builds `NO_EPOCH` from them, as listed under [Records](#records);
-- `SELECTION_PROVIDER_KEY: Final[str] = "provider"`, `SELECTION_TARGET_KEY: Final[str] = "target"`,
-  `SELECTION_CRITERIA_KEY: Final[str] = "criteria"`, `SELECTION_PREFERENCE_KEY: Final[str] = "preference"`, and
-  `SELECTION_CHOICE_KEY: Final[str] = "choice"`, the keys of `CacheRequest.selection`, which holds
-  `SELECTION_CHOICE_KEY` when `choice` is given and `SELECTION_PREFERENCE_KEY` when it is not;
-- `CACHE_RECORD_FORMAT: Final[int] = 1` and `CACHE_KEY_FORMAT: Final[int] = 1`;
-- `CACHE_MAX_RECORDS: Final[int] = 4096` and `CACHE_MAX_VALUE_BYTES: Final[int] = 1_048_576`;
-- `CACHE_HOLD_POLL_SECONDS: Final[float] = 0.01`;
-- `CACHE_ASYNC_WORKERS: Final[int] = 4` and `CACHE_THREAD_PREFIX: Final[str] = "hiddengems-cache"`, the worker
-  count and the thread-name prefix of the executor that `AsyncSecretCache` owns;
-- `CACHE_ISSUE_SOURCE: Final[str] = "secret-cache"`;
-- `CACHE_WAIT_TIMEOUT_REASON: Final[str] = "Waited for another read of the same gem until the time limit"`;
-- `CACHE_DISK_UNSUPPORTED: Final[str] = "The disk cache needs POSIX ownership and modes"`;
-- `SECRET_CACHE_WARNING: Final[str] = "Secret cache bypassed: {path} failed the {check} check"`;
-- `CACHE_EXTRA_MISSING: Final[str] = "Install hiddengems[cache] to use the secret cache"`.
-
-The codec's keys and tags are the `TYPED_*` constants of `GAL-chooser` in `constants/config.py`; this module
-declares none.
-
-## Layout
-
-```text
-~ pyproject.toml                                 extra cache = ["cryptography>=50.0"]
-+ src/hiddengems/secret_cache.py                 records, enums, abstract classes, SecretCache, AsyncSecretCache,
-                                                 PassThroughSecretCache, adapters, CacheIntegrityError,
-                                                 SecretCacheWarning
-+ src/hiddengems/secret_cache_profiles.py        the four profile builders
-+ src/hiddengems/constants/cache.py              the constants above
-~ src/hiddengems/hidden_gems.py                  cache=, dig_gem, hide_gem, invalidate step
-+ tests/contract/test_secret_cache_contract.py   the blocking suite
-```
-
-## Alternatives for the owner's decision
-
-- **Key placement,** the point the overview left open:
-  - (a) `FileCacheKeyStore(root / "keys")`, beside the records, protected by file modes as `~/.ssh` is.
-    Recommended: a cache shared across processes needs a shared key, and destroying the live key makes the live
-    records unreadable through the filesystem. A backup or snapshot that holds both a key file and its records
-    stays decryptable, so the claim covers only copies whose key copy is unavailable.
-  - (b) `MemoryCacheKeyStore` only. Keys never touch the disk, so the disk profile is not offered; only the
-    memory profile exists, and every process prompts once.
-  - (c) a key held in an OS keystore item, such as the Keychain. A separate feature: reading that item can
-    itself prompt.
-- **`AbstractAsyncSecretCache`:**
-  - (a) deliver it now as public API, with `AsyncSecretCache` and its profiles. Its caller is the library's
-    caller, because `HiddenGems` has no async API. Recommended: the blocking suite includes
-    `test_async_contract_does_not_block_loop`. This is an owner-mandated exception to the no-consumer rule of
-    `software-design.md`: the owner's blocking suite includes `test_async_contract_does_not_block_loop`.
-  - (b) declare it and lock its implementation until an async `HiddenGems` API exists to call it.
-- **A timed-out wait for the same identity or for the generation fence in `get_or_load`:**
-  - (a) `IncompleteGemLookupError` at `dig_gem`, as above. Recommended: callers already handle it, and the set
-    of errors `dig_gem` raises does not grow.
-  - (b) let `TimeoutError` reach the caller.
-- **A hit that overlaps `invalidate()`:**
-  - (a) a hit's linearization point is its check after decoding, and the linearization point of `invalidate` is
-    its `revoke` under the generation fence, as above. Recommended: hits for different identities run at the
-    same time, and a hit that passed its check returns even if `invalidate()` starts afterwards.
-  - (b) hits hold the generation fence, serializing them with `invalidate` and with each other. Not
-    recommended: one hit at a time.
-- **A refresh that fails:**
-  - (a) leave the existing record of that identity in place until the period ends, `invalidate()`, or a later
-    successful refresh. Recommended: the store contract stays at the owner's three operations, and the record
-    was valid for the caller's period.
-  - (b) add `discard(identity, epoch)` to `AbstractCacheStore`, and drop the record before loading.
-- **A write through `hide_gem`:**
-  - (a) invalidate the whole cache. Recommended: writes are rare, and the contract needs no operation to find
-    records by name, which the HMAC identity hides on purpose.
-  - (b) add an operation that drops one name's records.
-- **What one authentication unlocks:**
-  - (a) one request identity: one provider read fills one record. Recommended: it is what `get_or_load` does.
-  - (b) one provider.
-  - (c) every cached gem.
-
-## Acceptance cases
+### Acceptance cases
 
 The blocking gate is `tests/contract/test_secret_cache_contract.py`, in the contract-test location of `GAL-plugin`.
 S1, S6 to S10, S12, S13, and S23 to S25 are parametrized over the eight profile combinations; S2 to S5 over the four
@@ -802,19 +920,3 @@ Added by this proposal:
 - **S25** `test_hit_invalidation_linearization`: an `invalidate()` that starts after a hit's check in step 4
   does not stop that hit, which returns its values; an `invalidate()` whose `revoke` runs before that check
   makes the request a miss.
-
-## Dependencies on other features
-
-- **Delivery:** plan 6.5, after `GAL-masked-value` (6.4).
-- **Blocked by:**
-  - `GAL-parallel`, for `Deadline` with its injected clock, `_resolve_within`, `deadline_capability`, and
-    `get_gem_within`;
-  - `GAL-remember`, for `HiddenGems.invalidate`;
-  - `GAL-chooser`, for `canonical_json.py` with its type-preserving encoding and the `TYPED_*` constants,
-    `atomic_file.py`, `choice`, and `save_preference`;
-  - `GAL-masked-value`, for `masked`, the last `dig_gem` parameter before `refresh`;
-  - `GAL-plugin`, for the `tests/contract/` location;
-  - `GAL-settings`, for `LOOKUP_TIMEOUT_SECONDS`.
-- **Required by:** `GAL-encrypted-store`, which reuses `AbstractCacheCipher` and `AbstractCacheKeyStore`.
-- **Relates to:**
-  - the proposed Keychain existence check, which removes the second Keychain read even without a cache.
