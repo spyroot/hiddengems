@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import IO, Any, TypeAlias, Tuple, Dict
+from typing import IO, Any, Optional, TypeAlias, Union
 
 
 class ProviderNotAvailableError(LookupError):
     """Report that the caller selected a provider that is not available."""
 
 
-Gem: TypeAlias = str | bytes | list[Any] | dict[str, Any] | IO[str] | IO[bytes]
+Gem: TypeAlias = Union[str, bytes, list[Any], dict[str, Any], IO[str], IO[bytes]]
 
 
 class ProviderState(StrEnum):
@@ -44,8 +44,8 @@ class DetectionEvidence:
 
     source: EvidenceSource
     description: str
-    path: Path | None = None
-    observed_at: datetime | None = None
+    path: Optional[Path] = None
+    observed_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,8 @@ class DetectedProvider:
     provider: str
     instance_id: str
     state: ProviderState
-    evidence: Tuple[DetectionEvidence, ...]
-    settings: Dict[str, Any]
+    evidence: tuple[DetectionEvidence, ...]
+    settings: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -66,19 +66,19 @@ class GemReference:
     name: str
     provider: str
     instance_id: str
-    created_at: datetime | None = None
-    modified_at: datetime | None = None
-    location: Dict[str, Any] | str | None = None
+    created_at: Optional[datetime] = None
+    modified_at: Optional[datetime] = None
+    location: Optional[Union[dict[str, Any], str]] = None
 
 
 class ProviderLookupError(Exception):
     """A provider could not check a gem; no absence claim is implied."""
 
     def __init__(
-            self,
-            reason: str,
-            next_action: str,
-            matches: Tuple[GemReference, ...] = (),
+        self,
+        reason: str,
+        next_action: str,
+        matches: tuple[GemReference, ...] = (),
     ) -> None:
         self.reason = reason
         self.next_action = next_action
@@ -106,8 +106,8 @@ class ProviderObservation:
 
     provider: str
     instance_id: str
-    state: ProviderState | None
-    evidence: Tuple[DetectionEvidence, ...]
+    state: Optional[ProviderState]
+    evidence: tuple[DetectionEvidence, ...]
 
 
 @dataclass(frozen=True)
@@ -115,9 +115,9 @@ class LookupResult:
     """Confirmed locations and providers that could not be checked."""
 
     name: str
-    matches: Tuple[GemReference, ...]
-    issues: Tuple[LookupIssue, ...]
-    providers: Tuple[ProviderObservation, ...] = ()
+    matches: tuple[GemReference, ...]
+    issues: tuple[LookupIssue, ...]
+    providers: tuple[ProviderObservation, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """Return printable metadata only; gem values are never included."""

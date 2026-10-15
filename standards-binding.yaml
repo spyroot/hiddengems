@@ -6,7 +6,7 @@ spec:
   source:
     localPath: /Users/spyroot/dev/standards
     repository: https://github.com/spyroot/standards
-    revision: 56a579c2d86addb7bae0591f8fc1750561b168d7
+    revision: 8220329130794eabce65375c7d81fc77e204f590
   requiredContracts:
     - ci
     - unit-testing
@@ -23,6 +23,8 @@ spec:
     - documentation-rules
     - software-design
     - python-standards
+    - system-architecture
+    - js-standards
   providers: []
   projectAdditions:
     - .coordination/pr-coordinator-policy.md

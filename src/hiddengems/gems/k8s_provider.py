@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import base64
 import os
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
-from typing import Any, ClassVar, TypeAlias
+from typing import Any, ClassVar, Optional, TypeAlias, Union
 
 import yaml
 from kubernetes import client, config
@@ -34,7 +34,8 @@ from hiddengems.abstraction import (
 )
 from hiddengems.gems.types import PathValue
 
-_KubeconfigCandidate: TypeAlias = tuple[str | Path, EvidenceSource]
+_KubeconfigInput: TypeAlias = Optional[Union[str, Path, Iterable[Union[str, Path]]]]
+_KubeconfigCandidate: TypeAlias = tuple[Union[str, Path], EvidenceSource]
 _KubeconfigPath: TypeAlias = tuple[Path, EvidenceSource]
 _KubeconfigWarning: TypeAlias = tuple[Path, str]
 _KubeconfigPathResult: TypeAlias = tuple[
@@ -42,10 +43,7 @@ _KubeconfigPathResult: TypeAlias = tuple[
     tuple[_KubeconfigWarning, ...],
 ]
 _ContextCandidate: TypeAlias = tuple[
-    str | None,
-    ProviderState,
-    str | None,
-    tuple[str, ...],
+    Optional[str], ProviderState, Optional[str], tuple[str, ...]
 ]
 
 
@@ -54,7 +52,7 @@ class _KubeconfigRecord:
     """Merged non-secret observations for one kubeconfig context."""
 
     state: ProviderState
-    cluster_name: str | None
+    cluster_name: Optional[str]
     aliases: list[str] = field(default_factory=list)
     evidence: list[DetectionEvidence] = field(default_factory=list)
     namespace_candidates: list[str] = field(default_factory=list)
@@ -83,8 +81,8 @@ class KubernetesProvider(AbstractGemProvider):
 
     @classmethod
     def _directory_kubeconfigs(
-            cls,
-            directory: Path,
+        cls,
+        directory: Path,
     ) -> tuple[tuple[_KubeconfigPath, ...], tuple[_KubeconfigWarning, ...]]:
         """Collect bounded regular files from one conventional directory."""
         if directory.is_symlink() or os.path.ismount(directory):
@@ -108,8 +106,8 @@ class KubernetesProvider(AbstractGemProvider):
             )
         candidates: list[_KubeconfigPath] = []
         for child in sorted(
-                bounded[: cls._MAX_DIRECTORY_ENTRIES],
-                key=lambda item: item.name,
+            bounded[: cls._MAX_DIRECTORY_ENTRIES],
+            key=lambda item: item.name,
         ):
             try:
                 if child.is_file(follow_symlinks=False):
@@ -122,17 +120,17 @@ class KubernetesProvider(AbstractGemProvider):
 
     @classmethod
     def candidates_kubeconfigs(
-            cls,
-            configured: Any,
-            *,
-            include_local: bool,
+        cls,
+        configured: _KubeconfigInput,
+        *,
+        include_local: bool,
     ) -> tuple[tuple[_KubeconfigCandidate, ...], tuple[_KubeconfigWarning, ...]]:
         """Collect ordered kubeconfig candidates and discovery warnings.
 
         :param configured:
             An explicitly configured path, an iterable of paths, or ``None``.
             Explicit entries use ``EvidenceSource.CONFIG``.
-        :type configured: str | Path | Iterable[str | Path] | None
+        :type configured: _KubeconfigInput
         :param include_local:
             Whether to include ``KUBECONFIG``, ``~/.kube/config``, and files
             discovered in local ``.kube`` directories.
@@ -142,7 +140,7 @@ class KubernetesProvider(AbstractGemProvider):
             ``(directory, message)`` warnings.
         :rtype:
             tuple[
-                tuple[tuple[str | Path, EvidenceSource], ...],
+                tuple[_KubeconfigCandidate, ...],
                 tuple[tuple[Path, str], ...],
             ]
         """
@@ -168,11 +166,13 @@ class KubernetesProvider(AbstractGemProvider):
         return tuple(candidates), tuple(warnings)
 
     @classmethod
-    def _paths(cls, configured: Any, *, include_local: bool) -> _KubeconfigPathResult:
+    def _paths(
+        cls, configured: _KubeconfigInput, *, include_local: bool
+    ) -> _KubeconfigPathResult:
         """Canonicalize readable candidates and retain bounded-scan warnings.
 
         :param configured:  An explicitly configured path, an iterable of paths, or ``None``.
-        :type configured: Any
+        :type configured: _KubeconfigInput
         :param include_local: Whether to include environment and known local kubeconfig candidates.
         :return: The unique readable ``(path, evidence_source)`` pairs and the accumulated non-fatal ``(path, message)`` warnings.
         """
@@ -192,7 +192,7 @@ class KubernetesProvider(AbstractGemProvider):
                     warnings.append((path, "Kubeconfig file is not readable"))
                     continue
                 if source == EvidenceSource.KNOWN_PATH and (
-                        path.stat().st_size > cls._MAX_AUTO_CONFIG_BYTES
+                    path.stat().st_size > cls._MAX_AUTO_CONFIG_BYTES
                 ):
                     warnings.append(
                         (path, "Automatic kubeconfig file size limit reached")
@@ -209,8 +209,8 @@ class KubernetesProvider(AbstractGemProvider):
 
     @classmethod
     def candidate_clusters(
-            cls,
-            options: Mapping[str, Any],
+        cls,
+        options: Mapping[str, Any],
     ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
         """Collect ordered cluster targets without contacting a cluster.
 
@@ -243,8 +243,8 @@ class KubernetesProvider(AbstractGemProvider):
 
     @staticmethod
     def candidate_namespaces(
-            settings: Mapping[str, Any],
-            context: Mapping[str, Any] | None,
+        settings: Mapping[str, Any],
+        context: Optional[Mapping[str, Any]],
     ) -> tuple[str, ...]:
         """Collect ordered namespace candidates for one context.
 
@@ -253,7 +253,7 @@ class KubernetesProvider(AbstractGemProvider):
         :type settings: Mapping[str, Any]
         :param context:
             The selected kubeconfig context, or ``None`` when unresolved.
-        :type context: Mapping[str, Any] | None
+        :type context: Optional[Mapping[str, Any]]
         :return:
             Deduplicated explicit, context, and ``default`` namespaces.
         :rtype: tuple[str, ...]
@@ -272,9 +272,9 @@ class KubernetesProvider(AbstractGemProvider):
 
     @staticmethod
     def _kubeconfig_document(
-            path: Path,
-            parsed: dict[Path, dict[str, Any] | None],
-    ) -> dict[str, Any] | None:
+        path: Path,
+        parsed: MutableMapping[Path, Optional[dict[str, Any]]],
+    ) -> Optional[dict[str, Any]]:
         """Read and cache one kubeconfig-shaped YAML document."""
         if path not in parsed:
             try:
@@ -286,10 +286,10 @@ class KubernetesProvider(AbstractGemProvider):
 
     @classmethod
     def _context_candidate(
-            cls,
-            document: Mapping[str, Any],
-            settings: Mapping[str, Any],
-    ) -> _ContextCandidate | None:
+        cls,
+        document: Mapping[str, Any],
+        settings: Mapping[str, Any],
+    ) -> Optional[_ContextCandidate]:
         """Resolve one selected context and its namespace candidates."""
         if not ("contexts" in document or "current-context" in document):
             return None
@@ -300,8 +300,8 @@ class KubernetesProvider(AbstractGemProvider):
             item["name"]: item.get("context", {})
             for item in items
             if isinstance(item, dict)
-               and "name" in item
-               and isinstance(item.get("context"), dict)
+            and "name" in item
+            and isinstance(item.get("context"), dict)
         }
         selected = settings.get("context") or document.get("current-context")
         context = contexts.get(selected)
@@ -320,15 +320,15 @@ class KubernetesProvider(AbstractGemProvider):
 
     @staticmethod
     def _merge_context(
-            found: dict[tuple[Path, str | None], _KubeconfigRecord],
-            *,
-            path: Path,
-            source: EvidenceSource,
-            alias: str,
-            selected: str | None,
-            state: ProviderState,
-            cluster_name: str | None,
-            namespaces: tuple[str, ...],
+        found: MutableMapping[tuple[Path, Optional[str]], _KubeconfigRecord],
+        *,
+        path: Path,
+        source: EvidenceSource,
+        alias: str,
+        selected: Optional[str],
+        state: ProviderState,
+        cluster_name: Optional[str],
+        namespaces: Iterable[str],
     ) -> None:
         """Merge one alias observation into its concrete context identity.
         :param found:
@@ -361,8 +361,8 @@ class KubernetesProvider(AbstractGemProvider):
 
     @classmethod
     def _detected_records(
-            cls,
-            found: Mapping[tuple[Path, str | None], _KubeconfigRecord],
+        cls,
+        found: Mapping[tuple[Path, Optional[str]], _KubeconfigRecord],
     ) -> list[DetectedProvider]:
         """Build provider records from merged kubeconfig contexts.
         :param found:
@@ -388,9 +388,9 @@ class KubernetesProvider(AbstractGemProvider):
 
     @classmethod
     def _warning_records(
-            cls,
-            scan_warnings: Mapping[PathValue, str],
-            checked_paths: set[PathValue],
+        cls,
+        scan_warnings: Mapping[PathValue, str],
+        checked_paths: Collection[PathValue],
     ) -> tuple[DetectedProvider, ...]:
         """Represent unchecked paths without claiming the gem is absent.
         :param scan_warnings:
@@ -422,10 +422,10 @@ class KubernetesProvider(AbstractGemProvider):
             options
         )
 
-        found: dict[tuple[Path, str | None], _KubeconfigRecord] = {}
+        found: dict[tuple[Path, Optional[str]], _KubeconfigRecord] = {}
         scan_warnings: dict[Path, str] = {}
-        local_paths: _KubeconfigPathResult | None = None
-        parsed: dict[Path, dict[str, Any] | None] = {}
+        local_paths: Optional[_KubeconfigPathResult] = None
+        parsed: MutableMapping[Path, Optional[dict[str, Any]]] = {}
 
         for alias, settings in targets:
             include_local: bool = alias == "local" or not settings.get(
@@ -445,13 +445,13 @@ class KubernetesProvider(AbstractGemProvider):
 
             scan_warnings.update(warnings)
             for path, source in paths:
-                document: dict[str, Any] | None = cls._kubeconfig_document(
+                document: Optional[dict[str, Any]] = cls._kubeconfig_document(
                     path,
                     parsed,
                 )
                 if document is None:
                     continue
-                candidate: _ContextCandidate | None = cls._context_candidate(
+                candidate: Optional[_ContextCandidate] = cls._context_candidate(
                     document,
                     settings,
                 )
@@ -499,7 +499,7 @@ class KubernetesProvider(AbstractGemProvider):
         return client.CoreV1Api(api_client)
 
     def find_gem(
-            self, name: str, *, criteria: Mapping[str, Any] | None = None
+        self, name: str, *, criteria: Optional[Mapping[str, Any]] = None
     ) -> tuple[GemReference, ...]:
         """Check one Secret by name and return only non-secret location data.
 
@@ -521,8 +521,8 @@ class KubernetesProvider(AbstractGemProvider):
                 "Specify the intended kubeconfig path explicitly",
             )
         if criteria.get("cluster") and criteria["cluster"] not in (
-                *self.clusters,
-                self.cluster_name,
+            *self.clusters,
+            self.cluster_name,
         ):
             raise ProviderNotApplicable
         if criteria.get("kubeconfig_paths"):
@@ -608,12 +608,12 @@ class KubernetesProvider(AbstractGemProvider):
         ]
 
     def put_gem(
-            self,
-            name: str,
-            value: Gem,
-            *,
-            criteria: Mapping[str, Any] | None = None,
-            dry_run: bool = False,
+        self,
+        name: str,
+        value: Gem,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
+        dry_run: bool = False,
     ) -> GemReference:
         """Kubernetes writes need a separately specified update contract.
         :param name:

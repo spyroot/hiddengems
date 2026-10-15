@@ -2,14 +2,14 @@
 Manin abstract provider specification.
 Mustafa Bayramov mbayramov@cisco.com / spyroot@gmail.com
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from typing import Any, ClassVar, List, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, Optional
 
-from hiddengems.abstraction import (
-    DetectedProvider, Gem, GemReference)
+from hiddengems.abstraction import DetectedProvider, Gem, GemReference
 
 
 class AbstractGemProvider(ABC):
@@ -29,33 +29,33 @@ class AbstractGemProvider(ABC):
 
     @classmethod
     @abstractmethod
-    def detect(cls, **options: Any) -> Tuple[DetectedProvider, ...]:
+    def detect(cls, **options: Any) -> tuple[DetectedProvider, ...]:
         """Discover local provider configuration without authentication."""
         raise NotImplementedError
 
     @abstractmethod
     def find_gem(
-            self,
-            name: str,
-            *,
-            criteria: Mapping[str, Any] | None = None,
+        self,
+        name: str,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
     ) -> tuple[GemReference, ...]:
         """Return all concrete references for ``name`` in this instance."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_gem(self, reference: GemReference) -> List[Gem]:
-        """Return values for one reference, including a singleton as a list."""
+    def get_gem(self, reference: GemReference) -> Sequence[Gem]:
+        """Return values as a sequence, wrapping a singleton as one element."""
         raise NotImplementedError
 
     @abstractmethod
     def put_gem(
-            self,
-            name: str,
-            value: Gem,
-            *,
-            criteria: Mapping[str, Any] | None = None,
-            dry_run: bool = False,
+        self,
+        name: str,
+        value: Gem,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
+        dry_run: bool = False,
     ) -> GemReference:
         """Store ``value`` as ``name`` and return non-secret metadata.
 

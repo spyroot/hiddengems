@@ -1,0 +1,78 @@
+---
+name: Validate
+
+"on":
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Python 3.11 / macOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: /opt/homebrew/bin/bash --noprofile --norc -e -o pipefail {0}
+
+    steps:
+      - name: Prepare validation tools
+        shell: sh
+        run: |
+          brew install bash actionlint
+          /opt/homebrew/bin/bash -c '(( BASH_VERSINFO[0] >= 5 ))'
+
+      - name: Check out the candidate commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up the hiddengems environment
+        id: environment
+        uses: conda-incubator/setup-miniconda@be893c923ea9cf1cf7cd510fbdde27c7e18cbdcb  # v4.1.0
+        with:
+          activate-environment: hiddengems
+          environment-file: environment.yml
+          miniforge-version: latest
+          python-version: "3.11"
+
+      - name: Record validation identity
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SHA}"
+          printf 'source_commit=%s\n' "$(git rev-parse HEAD)"
+          printf 'workflow_run_id=%s\n' "${GITHUB_RUN_ID}"
+          /usr/bin/awk '$1 == "revision:" { print "standards_revision=" $2 }' \
+            standards-binding.yaml
+
+      - name: Validate the workflow
+        run: |
+          actionlint .github/workflows/validate.yml
+          conda run -n hiddengems yamllint \
+            -d '{extends: default, rules: {line-length: {max: 120}}}' \
+            .github/workflows/validate.yml
+
+      - name: Check Python source
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
+        run: conda run -n hiddengems ruff check --no-cache src tests
+
+      - name: Check Python formatting
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
+        run: conda run -n hiddengems ruff format --check --no-cache src tests
+
+      - name: Run tests and wheel checks
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
+        run: conda run -n hiddengems pytest
