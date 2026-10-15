@@ -6,10 +6,11 @@ spyroot@gmail.com
 """
 
 from __future__ import annotations
+
 import json
 from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 from hiddengems.abstraction import (
     DetectedProvider,
@@ -61,13 +62,13 @@ class HiddenGems:
     """Route gem lookup by concrete provider instance and non-secret evidence."""
 
     def __init__(
-            self,
-            providers: Sequence[DetectedProvider] | None = None,
-            *,
-            config_path: str | Path | None = None,
-            provider_settings: Mapping[str, Any] | None = None,
-            preferences: Mapping[str, Any] | None = None,
-            interactive: bool = False,
+        self,
+        providers: Optional[Sequence[DetectedProvider]] = None,
+        *,
+        config_path: Optional[Union[str, Path]] = None,
+        provider_settings: Optional[Mapping[str, Any]] = None,
+        preferences: Optional[Mapping[str, Any]] = None,
+        interactive: bool = False,
     ) -> None:
         """
 
@@ -90,7 +91,7 @@ class HiddenGems:
         documented_preferences = document.get("preferences", {})
 
         if not isinstance(configured, dict) or not isinstance(
-                documented_preferences, dict
+            documented_preferences, dict
         ):
             raise TypeError("Providers and preferences must be objects")
 
@@ -103,7 +104,7 @@ class HiddenGems:
             kind, _, details = self._selection(preference)
             if kind:
                 hints.setdefault(kind, []).append(details)
-        detection_options = {}
+        detection_options: dict[str, Mapping[str, Any]] = {}
 
         ordered = [
             *configured,
@@ -137,8 +138,8 @@ class HiddenGems:
                 else "Configured provider was not detected"
             )
             for kind in (
-                    (set(configured) | set(hints))
-                    - {record.provider for record in self.records}
+                (set(configured) | set(hints))
+                - {record.provider for record in self.records}
             )
         }
 
@@ -156,8 +157,8 @@ class HiddenGems:
 
     @staticmethod
     def _selection(
-            selected: str | Mapping[str, Any] | None,
-    ) -> tuple[str | None, str | None, MutableMapping[str, Any]]:
+        selected: Optional[Union[str, Mapping[str, Any]]],
+    ) -> tuple[Optional[str], Optional[str], MutableMapping[str, Any]]:
         """Normalize a preference without mutating the caller's mapping.
 
         :param selected: A provider name, preference mapping, or no preference.
@@ -184,11 +185,11 @@ class HiddenGems:
         )
 
     def inspect_gem(
-            self,
-            name: str,
-            *,
-            provider: str | None = None,
-            criteria: Mapping[str, Any] | None = None,
+        self,
+        name: str,
+        *,
+        provider: Optional[str] = None,
+        criteria: Optional[Mapping[str, Any]] = None,
     ) -> LookupResult:
         """Collect confirmed locations and reasons any location is unchecked
         :param name:
@@ -209,9 +210,9 @@ class HiddenGems:
             and (selected_id is None or record.instance_id == selected_id)
         )
         if (
-                selected_type is not None
-                and not records
-                and selected_type not in self._unavailable
+            selected_type is not None
+            and not records
+            and selected_type not in self._unavailable
         ):
             raise ProviderNotAvailableError(
                 f"Selected provider {selected_type!r} is not currently available"
@@ -274,11 +275,11 @@ class HiddenGems:
         return LookupResult(name, tuple(matches), tuple(issues), observations)
 
     def resolve_gem(
-            self,
-            name: str,
-            *,
-            provider: str | None = None,
-            criteria: Mapping[str, Any] | None = None,
+        self,
+        name: str,
+        *,
+        provider: Optional[str] = None,
+        criteria: Optional[Mapping[str, Any]] = None,
     ) -> GemReference:
         """Select exactly one location, never silently ignoring unchecked stores."""
         result = self.inspect_gem(name, provider=provider, criteria=criteria)
@@ -305,11 +306,11 @@ class HiddenGems:
         raise AmbiguousGemError(result)
 
     def dig_gem(
-            self,
-            name: str,
-            *,
-            provider: str | None = None,
-            criteria: Mapping[str, Any] | None = None,
+        self,
+        name: str,
+        *,
+        provider: Optional[str] = None,
+        criteria: Optional[Mapping[str, Any]] = None,
     ) -> list[Gem]:
         """Return the resolved provider's values, always as a list.
 
@@ -328,13 +329,13 @@ class HiddenGems:
         return list(values)
 
     def hide_gem(
-            self,
-            name: str,
-            value: Gem,
-            *,
-            provider: str | None = None,
-            criteria: Mapping[str, Any] | None = None,
-            dry_run: bool = False,
+        self,
+        name: str,
+        value: Gem,
+        *,
+        provider: Optional[str] = None,
+        criteria: Optional[Mapping[str, Any]] = None,
+        dry_run: bool = False,
     ) -> GemReference:
         """Write through one explicitly selected concrete provider.
 

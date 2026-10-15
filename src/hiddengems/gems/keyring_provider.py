@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from contextlib import ExitStack
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional, Union
 
 from hiddengems.abstract_provider import AbstractGemProvider
 from hiddengems.abstraction import (
@@ -47,7 +47,7 @@ class _NativeKeychainError(RuntimeError):
 
 
 class _NativeKeychain:
-    def __init__(self, library: str | Path) -> None:
+    def __init__(self, library: Union[str, Path]) -> None:
         self.library = ctypes.CDLL(str(library))
         self.library.hg_keychain_abi_version.argtypes = ()
         self.library.hg_keychain_abi_version.restype = ctypes.c_uint32
@@ -64,7 +64,7 @@ class _NativeKeychain:
         )
         self.library.hg_keychain_result_free.restype = None
 
-    def read(self, name: str) -> str | bytes | None:
+    def read(self, name: str) -> Optional[Union[str, bytes]]:
         if not isinstance(name, str) or not name or "\0" in name:
             raise ValueError("A keychain gem needs a nonempty string name")
 
@@ -92,8 +92,8 @@ class _NativeKeychain:
 
 
 def _library_candidates(
-        configured: str | None,
-) -> tuple[tuple[str, EvidenceSource, Path | None], ...]:
+    configured: Optional[str],
+) -> tuple[tuple[str, EvidenceSource, Optional[Path]], ...]:
     if configured:
         path = Path(configured).expanduser()
         return ((str(path), EvidenceSource.CALLER, path),)
@@ -166,10 +166,10 @@ class KeyringProvider(AbstractGemProvider):
         return ()
 
     def find_gem(
-            self,
-            name: str,
-            *,
-            criteria: Mapping[str, Any] | None = None,
+        self,
+        name: str,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
     ) -> tuple[GemReference, ...]:
         """
 
@@ -214,12 +214,12 @@ class KeyringProvider(AbstractGemProvider):
         return [value]
 
     def put_gem(
-            self,
-            name: str,
-            value: Gem,
-            *,
-            criteria: Mapping[str, Any] | None = None,
-            dry_run: bool = False,
+        self,
+        name: str,
+        value: Gem,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
+        dry_run: bool = False,
     ) -> GemReference:
         """
 

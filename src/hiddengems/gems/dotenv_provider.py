@@ -10,14 +10,14 @@ import os
 import stat
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from io import StringIO
 from itertools import islice
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, ClassVar, TypeGuard
+from typing import Any, ClassVar, Optional, TypeGuard
 
 from dotenv import dotenv_values, set_key
 
@@ -87,11 +87,11 @@ def _rewrite_file(filename: Path, contents: str) -> Iterator[Path]:
     temporary = None
     try:
         with NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=filename.parent,
-                prefix=".hidden-gems-",
-                delete=False,
+            mode="w",
+            encoding="utf-8",
+            dir=filename.parent,
+            prefix=".hidden-gems-",
+            delete=False,
         ) as stream:
             temporary = Path(stream.name)
             stream.write(contents)
@@ -107,11 +107,11 @@ class HiddenDotFileGem:
     """Store named strings in the caller's chosen .env file."""
 
     def __init__(
-            self,
-            filename: PathValue,
-            *,
-            backup_filename: PathValue | None = None,
-            parser_fn: Callable[[str], Gem] | None = None,
+        self,
+        filename: PathValue,
+        *,
+        backup_filename: Optional[PathValue] = None,
+        parser_fn: Optional[Callable[[str], Gem]] = None,
     ) -> None:
         """Select the gem file, optional backup file, and value parser
 
@@ -128,8 +128,8 @@ class HiddenDotFileGem:
             Path(backup_filename).expanduser() if backup_filename is not None else None
         )
         if (
-                self.backup_filename is not None
-                and self.backup_filename.resolve() == self.filename.resolve()
+            self.backup_filename is not None
+            and self.backup_filename.resolve() == self.filename.resolve()
         ):
             raise ValueError("Select a backup filename different from the gem file.")
 
@@ -170,12 +170,12 @@ class HiddenDotFileGem:
             exists = self.filename.exists()
             contents = self.filename.read_text(encoding="utf-8") if exists else ""
             if (
-                    exists
-                    and stat.S_IMODE(self.filename.stat().st_mode) == 0o600
-                    and dotenv_values(stream=StringIO(contents), interpolate=False).get(
-                name
-            )
-                    == value
+                exists
+                and stat.S_IMODE(self.filename.stat().st_mode) == 0o600
+                and dotenv_values(stream=StringIO(contents), interpolate=False).get(
+                    name
+                )
+                == value
             ):
                 return
 
@@ -195,7 +195,7 @@ class _DotEnvCandidate:
     """One canonical dotenv path proposed by config or bounded discovery."""
 
     path: Path
-    backup_filename: PathValue | None
+    backup_filename: Optional[PathValue]
     source: EvidenceSource
 
 
@@ -203,8 +203,8 @@ class _DotEnvCandidate:
 class _DotEnvPathRecord:
     """Merged non-secret observations for one canonical dotenv path."""
 
-    backup_filename: PathValue | None
-    access_issue: str | None
+    backup_filename: Optional[PathValue]
+    access_issue: Optional[str]
     evidence: list[DetectionEvidence] = field(default_factory=list)
 
 
@@ -240,10 +240,10 @@ class DotEnvProvider(AbstractGemProvider):
         :param settings:
         """
         self.instance_id = settings["instance_id"]
-        self.scan_issue: str | None = self._optional_issue(
+        self.scan_issue: Optional[str] = self._optional_issue(
             settings.get("scan_issue"), setting="scan_issue"
         )
-        self.access_issue: str | None = self._optional_issue(
+        self.access_issue: Optional[str] = self._optional_issue(
             settings.get("access_issue"), setting="access_issue"
         )
         self.parser_fn = settings.get("parser_fn")
@@ -252,16 +252,16 @@ class DotEnvProvider(AbstractGemProvider):
         configured_backup = settings.get("backup_filename")
 
         # These are the validated and resolved Path values.
-        self.path: Path | None = self._optional_path(
+        self.path: Optional[Path] = self._optional_path(
             configured_path,
             setting="path",
         )
-        self.backup_filename: Path | None = self._optional_path(
+        self.backup_filename: Optional[Path] = self._optional_path(
             configured_backup,
             setting="backup_filename",
         )
 
-        self._dotfile: HiddenDotFileGem | None = (
+        self._dotfile: Optional[HiddenDotFileGem] = (
             HiddenDotFileGem(
                 self.path,
                 backup_filename=self.backup_filename,
@@ -272,14 +272,14 @@ class DotEnvProvider(AbstractGemProvider):
         )
 
     @staticmethod
-    def _optional_issue(value: object, *, setting: str) -> str | None:
+    def _optional_issue(value: object, *, setting: str) -> Optional[str]:
         """Validate one optional caller-visible issue message."""
         if value is None or isinstance(value, str):
             return value
         raise TypeError(f"{setting} must be a string, not {type(value).__name__}")
 
     @staticmethod
-    def _optional_path(value: object, *, setting: str) -> Path | None:
+    def _optional_path(value: object, *, setting: str) -> Optional[Path]:
         """Validate and resolve an optional path value.
 
         :param value: Original value supplied through provider settings.
@@ -287,7 +287,7 @@ class DotEnvProvider(AbstractGemProvider):
         :param setting: Setting name used in validation errors.
         :type setting: str
         :return: The resolved path, or ``None``.
-        :rtype: Path | None
+        :rtype: Optional[Path]
         :raises TypeError:
             If the supplied value is not a string-compatible path.
         """
@@ -304,7 +304,7 @@ class DotEnvProvider(AbstractGemProvider):
         return Path(filesystem_path).expanduser().resolve()
 
     @staticmethod
-    def _configured_candidate(value: Any) -> _DotEnvCandidate:
+    def _configured_candidate(value: object) -> _DotEnvCandidate:
         """Build one canonical candidate from caller configuration.
 
         :param value:
@@ -328,8 +328,8 @@ class DotEnvProvider(AbstractGemProvider):
 
     @classmethod
     def _configured_candidates(
-            cls,
-            options: Mapping[str, Any],
+        cls,
+        options: Mapping[str, Any],
     ) -> tuple[_DotEnvCandidate, ...]:
         """Resolve complete paths already supplied by config or preference.
 
@@ -352,10 +352,10 @@ class DotEnvProvider(AbstractGemProvider):
 
     @classmethod
     def _directory_entries(
-            cls,
-            directory: Path,
-            remaining: int,
-    ) -> tuple[tuple[os.DirEntry[str], ...], bool, str | None]:
+        cls,
+        directory: Path,
+        remaining: int,
+    ) -> tuple[tuple[os.DirEntry[str], ...], bool, Optional[str]]:
         """Build one canonical candidate from caller configuration.
 
         :param directory:
@@ -374,7 +374,7 @@ class DotEnvProvider(AbstractGemProvider):
         return tuple(entries), limit_reached, None
 
     @classmethod
-    def _scan(cls, root: Path) -> tuple[tuple[Path, ...], str | None]:
+    def _scan(cls, root: Path) -> tuple[tuple[Path, ...], Optional[str]]:
         """Find dotenv-shaped files below ``root`` within fixed work bounds.
 
         :param root:
@@ -420,9 +420,9 @@ class DotEnvProvider(AbstractGemProvider):
 
     @classmethod
     def _discovered_candidates(
-            cls,
-            root: Path,
-    ) -> tuple[tuple[_DotEnvCandidate, ...], str | None]:
+        cls,
+        root: Path,
+    ) -> tuple[tuple[_DotEnvCandidate, ...], Optional[str]]:
         """Resolve an unspecified path through bounded local discovery.
         :param root:
         :return:
@@ -438,8 +438,8 @@ class DotEnvProvider(AbstractGemProvider):
 
     @staticmethod
     def _inspect_candidate(
-            candidate: _DotEnvCandidate,
-    ) -> _DotEnvPathRecord | None:
+        candidate: _DotEnvCandidate,
+    ) -> Optional[_DotEnvPathRecord]:
         """Classify one path without reading any dotenv value.
         :param candidate:
         :return:
@@ -467,8 +467,8 @@ class DotEnvProvider(AbstractGemProvider):
 
     @classmethod
     def _merge_candidates(
-            cls,
-            candidates: tuple[_DotEnvCandidate, ...],
+        cls,
+        candidates: Iterable[_DotEnvCandidate],
     ) -> dict[Path, _DotEnvPathRecord]:
         """Collapse equivalent paths while retaining all detection evidence.
         :param candidates:
@@ -492,9 +492,9 @@ class DotEnvProvider(AbstractGemProvider):
 
     @classmethod
     def _detected_record(
-            cls,
-            path: Path,
-            record: _DotEnvPathRecord,
+        cls,
+        path: Path,
+        record: _DotEnvPathRecord,
     ) -> DetectedProvider:
         """Convert one classified path into a provider record.
 
@@ -547,7 +547,7 @@ class DotEnvProvider(AbstractGemProvider):
         """
         candidates: tuple[_DotEnvCandidate, ...] = cls._configured_candidates(options)
         scan_root: Path = Path.cwd().resolve()
-        scan_issue: str | None = None
+        scan_issue: Optional[str] = None
         if not candidates:
             candidates, scan_issue = cls._discovered_candidates(scan_root)
         records: dict[Path, _DotEnvPathRecord] = cls._merge_candidates(candidates)
@@ -558,7 +558,7 @@ class DotEnvProvider(AbstractGemProvider):
             return detected
         return detected + (cls._scan_issue_record(scan_root, scan_issue),)
 
-    def _check_criteria(self, criteria: Mapping[str, Any] | None) -> None:
+    def _check_criteria(self, criteria: Optional[Mapping[str, Any]]) -> None:
         """
 
         :param criteria:
@@ -633,10 +633,10 @@ class DotEnvProvider(AbstractGemProvider):
         return self._require_readable_dotfile()
 
     def find_gem(
-            self,
-            name: str,
-            *,
-            criteria: Mapping[str, Any] | None = None,
+        self,
+        name: str,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
     ) -> tuple[GemReference, ...]:
         """
         Return a non-secret reference when this file contains ``name``.
@@ -679,12 +679,12 @@ class DotEnvProvider(AbstractGemProvider):
             ) from error
 
     def put_gem(
-            self,
-            name: str,
-            value: Gem,
-            *,
-            criteria: Mapping[str, Any] | None = None,
-            dry_run: bool = False,
+        self,
+        name: str,
+        value: Gem,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
+        dry_run: bool = False,
     ) -> GemReference:
         """Store one string in this selected dotenv file.
         :param name:

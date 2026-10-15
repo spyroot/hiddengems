@@ -28,9 +28,7 @@ class GemProvider:
     )
 
     @classmethod
-    def detect(
-            cls, **options: Any
-    ) -> tuple[DetectedProvider, ...]:
+    def detect(cls, **options: Any) -> tuple[DetectedProvider, ...]:
         """
         :param options:
         :return:
@@ -65,9 +63,9 @@ class GemProvider:
 
     @classmethod
     def create(
-            cls,
-            record: DetectedProvider,
-            **overrides: Any,
+        cls,
+        record: DetectedProvider,
+        **overrides: Any,
     ) -> AbstractGemProvider:
         """
         :param record:

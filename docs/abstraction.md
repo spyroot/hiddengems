@@ -63,8 +63,8 @@ it does not replace the named result records defined in
 
 ```python
 def _selection(
-    selected: str | Mapping[str, Any] | None,
-) -> tuple[str | None, str | None, MutableMapping[str, Any]]:
+    selected: Optional[Union[str, Mapping[str, Any]]],
+) -> tuple[Optional[str], Optional[str], MutableMapping[str, Any]]:
     ...
 ```
 

@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional, Union
 
 from hiddengems.abstract_provider import AbstractGemProvider
 from hiddengems.abstraction import (
@@ -37,7 +37,7 @@ _INTEGRATION_HELP = (
 )
 
 
-def _timestamp(value: object) -> datetime | None:
+def _timestamp(value: object) -> Optional[datetime]:
     """Convert a supported value to a UTC timestamp.
 
     Naive datetimes are assumed to represent UTC.
@@ -47,7 +47,7 @@ def _timestamp(value: object) -> datetime | None:
     :param value: A ``datetime`` or ISO-8601 timestamp string.
     :type value: object
     :return: The parsed timezone-aware UTC timestamp, or ``None`` when invalid.
-    :rtype: datetime | None
+    :rtype: Optional[datetime]
     """
     timestamp: datetime
 
@@ -99,8 +99,8 @@ class OnePasswordProvider(AbstractGemProvider):
         system = platform.system()
 
         def add_environment_path(
-                variable: str,
-                *parts: str,
+            variable: str,
+            *parts: str,
         ) -> None:
             """
 
@@ -185,23 +185,23 @@ class OnePasswordProvider(AbstractGemProvider):
         """
         try:
             return path.is_file() and (
-                    platform.system() == "Windows" or os.access(path, os.X_OK)
+                platform.system() == "Windows" or os.access(path, os.X_OK)
             )
         except OSError:
             return False
 
     @classmethod
     def _find_cli(
-            cls,
-            candidate: str | Path | None,
-    ) -> tuple[Path | None, EvidenceSource]:
+        cls,
+        candidate: Optional[Union[str, Path]],
+    ) -> tuple[Optional[Path], EvidenceSource]:
         """Find the 1Password CLI executable.
 
         :param candidate: An explicitly configured executable path or command.
-        :type candidate: str | Path | None
+        :type candidate: Optional[Union[str, Path]]
         :return: The executable path and evidence source, or
             ``(None, EvidenceSource.UNKNOWN)``.
-        :rtype: tuple[Path | None, EvidenceSource]
+        :rtype: tuple[Optional[Path], EvidenceSource]
         """
         if candidate is not None:
             path = Path(candidate).expanduser()
@@ -317,7 +317,7 @@ class OnePasswordProvider(AbstractGemProvider):
                 "1Password CLI did not return JSON", _INTEGRATION_HELP
             ) from error
 
-    def _accounts(self, wanted: str | None = None) -> tuple[str | None, ...]:
+    def _accounts(self, wanted: Optional[str] = None) -> tuple[Optional[str], ...]:
         """Resolve local account selectors; no account name is not a stop."""
         accounts = self._run_cli("account", "list")
         if not isinstance(accounts, list):
@@ -360,7 +360,7 @@ class OnePasswordProvider(AbstractGemProvider):
         )
 
     async def _find_sdk(
-            self, name: str, vault_id: str | None = None
+        self, name: str, vault_id: Optional[str] = None
     ) -> tuple[GemReference, ...]:
         sdk = await self._sdk_client()
         matches = []
@@ -387,7 +387,7 @@ class OnePasswordProvider(AbstractGemProvider):
         return tuple(matches)
 
     def find_gem(
-            self, name: str, *, criteria: Mapping[str, Any] | None = None
+        self, name: str, *, criteria: Optional[Mapping[str, Any]] = None
     ) -> tuple[GemReference, ...]:
         """Find exact item titles, preserving account/vault ambiguity."""
         criteria = criteria or {}
@@ -396,7 +396,7 @@ class OnePasswordProvider(AbstractGemProvider):
         wanted_account = criteria.get("account_name")
         if wanted_account and self.account_name and wanted_account != self.account_name:
             raise ProviderNotApplicable
-        cli_error: ProviderLookupError | None = None
+        cli_error: Optional[ProviderLookupError] = None
         matches: list[GemReference] = []
         if self.cli is not None:
             try:
@@ -410,8 +410,8 @@ class OnePasswordProvider(AbstractGemProvider):
                         vault = item.get("vault") or {}
                         vault_id = vault.get("id") if isinstance(vault, dict) else vault
                         if (
-                                criteria.get("vault_id")
-                                and criteria["vault_id"] != vault_id
+                            criteria.get("vault_id")
+                            and criteria["vault_id"] != vault_id
                         ):
                             continue
                         matches.append(
@@ -460,7 +460,7 @@ class OnePasswordProvider(AbstractGemProvider):
         return [
             {
                 (
-                        getattr(field, "title", None) or getattr(field, "id", "field")
+                    getattr(field, "title", None) or getattr(field, "id", "field")
                 ): getattr(field, "value", None)
                 for field in item.fields
             }
@@ -487,12 +487,12 @@ class OnePasswordProvider(AbstractGemProvider):
         ]
 
     def put_gem(
-            self,
-            name: str,
-            value: Gem,
-            *,
-            criteria: Mapping[str, Any] | None = None,
-            dry_run: bool = False,
+        self,
+        name: str,
+        value: Gem,
+        *,
+        criteria: Optional[Mapping[str, Any]] = None,
+        dry_run: bool = False,
     ) -> GemReference:
         """1Password item writes need a separately specified item format."""
         raise NotImplementedError("1Password gem storage is not implemented")

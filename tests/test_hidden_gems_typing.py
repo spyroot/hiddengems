@@ -6,7 +6,7 @@ from collections import UserDict
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Optional, Union
 
 import pytest
 
@@ -43,8 +43,8 @@ from hiddengems.hidden_gems import HiddenGems
     ],
 )
 def test_selection_returns_fresh_mutable_criteria(
-    selected: str | Mapping[str, Any] | None,
-    expected: tuple[str | None, str | None, dict[str, Any]],
+    selected: Optional[Union[str, Mapping[str, Any]]],
+    expected: tuple[Optional[str], Optional[str], dict[str, Any]],
 ) -> None:
     """Selection always isolates mutable criteria from caller-owned mappings."""
     source_before = dict(selected) if isinstance(selected, Mapping) else None
@@ -136,7 +136,7 @@ def test_dig_gem_normalizes_provider_tuple_without_flattening_nested_value(
             self,
             name: str,
             *,
-            criteria: Mapping[str, Any] | None = None,
+            criteria: Optional[Mapping[str, Any]] = None,
         ) -> tuple[GemReference, ...]:
             """Return the single deterministic fake reference."""
             assert name == reference.name
@@ -150,9 +150,7 @@ def test_dig_gem_normalizes_provider_tuple_without_flattening_nested_value(
 
     provider = TupleProvider()
 
-    def create(
-        cls: type[GemProvider], selected: DetectedProvider
-    ) -> TupleProvider:
+    def create(cls: type[GemProvider], selected: DetectedProvider) -> TupleProvider:
         """Return the fake provider for the requested record."""
         assert selected == record
         return provider
@@ -173,7 +171,7 @@ def test_dig_gem_normalizes_provider_tuple_without_flattening_nested_value(
 def test_dig_gem_rejects_scalar_outer_provider_results(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    outer_result: str | bytes,
+    outer_result: Union[str, bytes],
 ) -> None:
     """Bare scalar results cannot be normalized into a gem list."""
     record = DetectedProvider(
@@ -190,23 +188,21 @@ def test_dig_gem_rejects_scalar_outer_provider_results(
             self,
             name: str,
             *,
-            criteria: Mapping[str, Any] | None = None,
+            criteria: Optional[Mapping[str, Any]] = None,
         ) -> tuple[GemReference, ...]:
             """Return the single deterministic fake reference."""
             assert name == reference.name
             assert criteria == {}
             return (reference,)
 
-        def get_gem(self, selected: GemReference) -> str | bytes:
+        def get_gem(self, selected: GemReference) -> Union[str, bytes]:
             """Return an invalid bare scalar instead of a result sequence."""
             assert selected == reference
             return outer_result
 
     provider = ScalarProvider()
 
-    def create(
-        cls: type[GemProvider], selected: DetectedProvider
-    ) -> ScalarProvider:
+    def create(cls: type[GemProvider], selected: DetectedProvider) -> ScalarProvider:
         """Return the fake provider for the requested record."""
         assert selected == record
         return provider
