@@ -1,4 +1,4 @@
-apiVersion: standards.spyroot.dev/v1alpha1
+apiVersion: standards.spyroot.dev/v1alpha2
 kind: ProjectStandardsBinding
 metadata:
   name: hiddengems
@@ -6,7 +6,7 @@ spec:
   source:
     localPath: /Users/spyroot/dev/standards
     repository: https://github.com/spyroot/standards
-    revision: 8220329130794eabce65375c7d81fc77e204f590
+    revision: 12b088d7382d4ad06be91362307c66bc7efd983b
   requiredContracts:
     - ci
     - unit-testing
@@ -25,6 +25,8 @@ spec:
     - python-standards
     - system-architecture
     - js-standards
+    - context7
+    - work-classification
   providers: []
   projectAdditions:
     - .coordination/pr-coordinator-policy.md
