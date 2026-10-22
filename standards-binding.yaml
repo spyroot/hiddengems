@@ -1,4 +1,4 @@
-apiVersion: standards.spyroot.dev/v1alpha1
+apiVersion: standards.spyroot.dev/v1alpha2
 kind: ProjectStandardsBinding
 metadata:
   name: hiddengems
@@ -25,6 +25,8 @@ spec:
     - python-standards
     - system-architecture
     - js-standards
+    - context7
+    - work-classification
   providers: []
   projectAdditions:
     - .coordination/pr-coordinator-policy.md
